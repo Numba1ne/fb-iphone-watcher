@@ -1,0 +1,59 @@
+# Copy this file to config.yaml and edit. config.yaml is gitignored.
+# Secrets (tokens, webhook URLs) go in .env, never here.
+
+search:
+  query: "iphone"
+  city_slug: "london"        # the Marketplace area to search
+  radius_km: 25
+  latitude: 51.5074          # centre of the radius. London = 51.5074, -0.1278
+  longitude: -0.1278
+  min_price: 100
+  max_price: 1200
+  # Escape hatch: open Marketplace in your browser, configure the search you
+  # want, copy the whole URL, and paste it here. It then overrides everything
+  # above. Useful if Facebook renames a URL parameter.
+  search_url_override: ""
+
+polling:
+  interval_seconds: 45       # minimum 15 — anything faster risks a Facebook block
+  jitter_seconds: 8          # random +/- seconds so polling isn't metronomic
+  max_cards: 30              # newest-first, so the top of the page is enough
+  restart_browser_every: 100 # polls between browser restarts, to free memory
+
+browser:
+  headless: true             # false to watch it work in a visible window
+  user_data_dir: "data/browser-profile"
+  navigation_timeout_ms: 30000
+
+filters:
+  # A listing must contain at least one of these in its title.
+  require_any:
+    - "iphone"
+  # A listing is dropped if its title matches any of these. "locked" here does
+  # NOT match "unlocked" — that's deliberate.
+  exclude:
+    - "for parts"
+    - "parts only"
+    - "spares"
+    - "cracked"
+    - "broken"
+    - "faulty"
+    - "not working"
+    - "screen damage"
+    - "icloud locked"
+    - "activation lock"
+    - "locked"
+    - "blacklisted"
+    - "bad imei"
+    - "sold"
+
+notifications:
+  telegram: true
+  discord: true
+  # On the very first run, record existing listings without alerting on them.
+  first_run_silent: true
+
+paths:
+  db: "data/bot.db"
+  log: "data/logs/bot.log"
+  debug: "data/debug"

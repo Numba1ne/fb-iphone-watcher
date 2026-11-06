@@ -1,0 +1,10 @@
+# Secrets and local state — never commit these
+.env
+config.yaml
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
