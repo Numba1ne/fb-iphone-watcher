@@ -96,7 +96,32 @@ class AppConfig:
     telegram_token: str
     telegram_chat_id: str
     discord_webhook_url: str
+    debug: bool = False
 
     @property
     def now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
+
+    def with_overrides(
+        self,
+        *,
+        headless: bool | None = None,
+        dashboard_port: int | None = None,
+        debug: bool | None = None,
+    ) -> "AppConfig":
+        """Return a copy with CLI overrides applied.
+
+        The dashboard port isn't stored on AppConfig; it is validated here so
+        a typo fails fast instead of binding somewhere unexpected.
+        """
+        from dataclasses import replace
+
+        if dashboard_port is not None and not (1024 <= dashboard_port <= 65535):
+            raise ValueError(
+                f"--port {dashboard_port} is out of range; use 1024–65535."
+            )
+        return replace(
+            self,
+            headless=self.headless if headless is None else headless,
+            debug=self.debug if debug is None else debug,
+        )

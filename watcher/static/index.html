@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>iPhone Watcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;650;700&family=JetBrains+Mono:wght@500;600&display=swap">
+<style>
+/* Layout: a single 1180px column. Status strip spans full width; below it a
+   2:1 grid puts the listings table beside the poll history, stacking on phone. */
+:root {
+  --bg:        #f4f6f7;
+  --surface:   #ffffff;
+  --surface-2: #e9eef0;
+  --ink:       #12181b;
+  --muted:     #5b6a70;
+  --faint:     #84949a;
+  --line:      #d5dee1;
+  --line-soft: #e6ecee;
+  --accent:    #0f6b6b;
+  --accent-ink:#0a4f4f;
+  --accent-bg: #dceeed;
+  --good:      #1f7a4d;
+  --good-bg:   #d9efe2;
+  --warn:      #8a5a00;
+  --warn-bg:   #f7e9c8;
+  --bad:       #b3261e;
+  --bad-bg:    #fae0de;
+  --shadow:    0 1px 2px rgba(10, 30, 35, .06), 0 8px 24px -12px rgba(10, 30, 35, .16);
+
+  --f-body: "Inter Tight", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-data: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+  --r: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #0c1113;
+    --surface:   #141c1f;
+    --surface-2: #1c2629;
+    --ink:       #e6eef0;
+    --muted:     #93a5ab;
+    --faint:     #6c7f85;
+    --line:      #263236;
+    --line-soft: #1e282b;
+    --accent:    #4fbdb4;
+    --accent-ink:#8ad9d1;
+    --accent-bg: #10302e;
+    --good:      #58c98f;
+    --good-bg:   #0f2f20;
+    --warn:      #e0b45a;
+    --warn-bg:   #33270c;
+    --bad:       #ef7c73;
+    --bad-bg:    #3a1613;
+    --shadow:    0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #0c1113;
+  --surface:   #141c1f;
+  --surface-2: #1c2629;
+  --ink:       #e6eef0;
+  --muted:     #93a5ab;
+  --faint:     #6c7f85;
+  --line:      #263236;
+  --line-soft: #1e282b;
+  --accent:    #4fbdb4;
+  --accent-ink:#8ad9d1;
+  --accent-bg: #10302e;
+  --good:      #58c98f;
+  --good-bg:   #0f2f20;
+  --warn:      #e0b45a;
+  --warn-bg:   #33270c;
+  --bad:       #ef7c73;
+  --bad-bg:    #3a1613;
+  --shadow:    0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: 14px;
+  line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 20px 48px; }
+
+/* ---------- header ---------- */
+header.top {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding-block: 4px 18px;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand h1 { margin: 0; font-size: 18px; letter-spacing: -.01em; font-weight: 650; }
+.brand .sub { color: var(--muted); font-size: 12.5px; }
+.spacer { flex: 1; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; }
+button {
+  font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
+  border-radius: 8px; padding: 7px 13px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink);
+  transition: background .12s, border-color .12s, opacity .12s;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .42; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: var(--accent-ink); }
+button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+
+/* ---------- status strip ---------- */
+.strip {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r); box-shadow: var(--shadow);
+  display: grid; grid-template-columns: 1.3fr repeat(4, 1fr);
+  overflow: hidden; margin-bottom: 18px;
+}
+.cell { padding: 14px 16px; border-left: 1px solid var(--line-soft); min-width: 0; }
+.cell:first-child { border-left: 0; }
+.cell .k {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--muted); font-weight: 600; margin-bottom: 5px;
+}
+.cell .v { font-size: 22px; font-weight: 600; letter-spacing: -.015em; font-variant-numeric: tabular-nums; }
+.cell .v small { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.cell .note { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 600; padding: 4px 10px 4px 8px;
+  border-radius: 999px; letter-spacing: .01em;
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.running { background: var(--good-bg); color: var(--good); }
+.pill.running::before { animation: pulse 2s ease-in-out infinite; }
+.pill.stopped { background: var(--surface-2); color: var(--muted); }
+.pill.starting, .pill.stopping { background: var(--warn-bg); color: var(--warn); }
+.pill.failed { background: var(--bad-bg); color: var(--bad); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pill.running::before { animation: none; } }
+
+/* ---------- layout ---------- */
+.grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; }
+  .strip { grid-template-columns: 1fr 1fr; }
+  .strip .cell { border-left: 0; border-top: 1px solid var(--line-soft); }
+  .strip .cell:nth-child(1), .strip .cell:nth-child(2) { border-top: 0; }
+}
+@media (max-width: 520px) { .strip { grid-template-columns: 1fr; } .strip .cell { border-top: 1px solid var(--line-soft) !important; } .strip .cell:first-child { border-top: 0 !important; } }
+
+.panel {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.panel > .head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 13px 16px; border-bottom: 1px solid var(--line-soft);
+}
+.panel h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+.count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.filters input, .filters select {
+  font: inherit; font-size: 12.5px; padding: 5px 9px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+}
+.filters input:focus-visible, .filters select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.filters input[type="search"] { width: 150px; }
+
+/* ---------- table ---------- */
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); font-weight: 600; padding: 9px 16px; background: var(--bg);
+  border-bottom: 1px solid var(--line-soft); white-space: nowrap;
+}
+tbody td { padding: 10px 16px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--surface-2); }
+td.price { font-family: var(--f-data); font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.title a { color: var(--ink); text-decoration: none; font-weight: 520; }
+td.title a:hover { color: var(--accent); text-decoration: underline; }
+td.loc { color: var(--muted); font-size: 12.5px; }
+td.when { color: var(--faint); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tag {
+  display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; padding: 2px 6px; border-radius: 5px;
+  background: var(--accent-bg); color: var(--accent-ink); margin-left: 6px; vertical-align: 1px;
+}
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+.empty strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 4px; }
+
+/* ---------- poll history ---------- */
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; padding: 14px 16px 6px; border-bottom: 1px solid var(--line-soft); }
+.bars:empty::after {
+  content: "Waiting for the first poll";
+  color: var(--muted); font-size: 12px; align-self: center; width: 100%; text-align: center;
+}
+.bar { flex: 1; border-radius: 2px 2px 0 0; background: var(--accent); min-height: 3px; opacity: .82; }
+.bar.fail { background: var(--bad); opacity: 1; }
+.bar.zero { background: var(--line); opacity: 1; }
+.legend { display: flex; gap: 14px; padding: 4px 16px 12px; font-size: 11px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.settings { padding: 4px 16px 16px; }
+.settings dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; font-size: 12.5px; }
+.settings dt { color: var(--muted); }
+.settings dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 520; word-break: break-word; }
+.settings dd.mono { font-family: var(--f-data); font-size: 11.5px; }
+hr.sep { border: 0; border-top: 1px solid var(--line-soft); margin: 0; }
+
+/* ---------- banners ---------- */
+.banner {
+  display: flex; gap: 10px; align-items: flex-start; padding: 11px 14px;
+  border-radius: 8px; font-size: 13px; margin-bottom: 18px; border: 1px solid transparent;
+}
+.banner.bad { background: var(--bad-bg); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, transparent); }
+.banner.warn { background: var(--warn-bg); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.banner code { font-family: var(--f-data); font-size: 12px; background: color-mix(in srgb, currentColor 12%, transparent); padding: 1px 5px; border-radius: 4px; }
+.banner button { margin-left: auto; background: transparent; border-color: currentColor; color: inherit; flex-shrink: 0; }
+[hidden] { display: none !important; }
+
+.toast {
+  position: fixed; bottom: max(18px, env(safe-area-inset-bottom, 0px)); left: 50%;
+  transform: translateX(-50%) translateY(8px); opacity: 0; pointer-events: none;
+  background: var(--ink); color: var(--bg); padding: 9px 16px; border-radius: 8px;
+  font-size: 13px; font-weight: 520; transition: opacity .18s, transform .18s; z-index: 40;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>iPhone Watcher</h1>
+      <span class="sub" id="search-sub">Facebook Marketplace</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="controls">
+      <button id="btn-start" class="primary" type="button">Start</button>
+      <button id="btn-stop" class="danger" type="button">Stop</button>
+      <button id="btn-poll" type="button">Poll now</button>
+    </div>
+  </header>
+
+  <div id="banner-session" class="banner bad" hidden>
+    <span>
+      <strong>Facebook session expired.</strong>
+      Run <code>python main.py --login</code> in a terminal, then press Start again.
+    </span>
+  </div>
+
+  <section class="strip" aria-label="Status">
+    <div class="cell">
+      <div class="k">Watcher</div>
+      <div class="v" style="line-height:1.5"><span id="state-pill" class="pill stopped">Stopped</span></div>
+      <div class="note" id="state-note">&nbsp;</div>
+    </div>
+    <div class="cell">
+      <div class="k">Last poll</div>
+      <div class="v" id="last-poll">—</div>
+      <div class="note" id="next-poll">&nbsp;</div>
+    </div>
+    <div class="cell">
+      <div class="k">Listings seen</div>
+      <div class="v" id="total">0</div>
+      <div class="note" id="range">&nbsp;</div>
+    </div>
+    <div class="cell">
+      <div class="k">Alerts sent</div>
+      <div class="v" id="alerted">0</div>
+      <div class="note">Telegram + Discord</div>
+    </div>
+    <div class="cell">
+      <div class="k">Polls run</div>
+      <div class="v" id="polls-run">0</div>
+      <div class="note" id="failure-note">&nbsp;</div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="panel" aria-label="Listings">
+      <div class="head">
+        <h2>Listings</h2>
+        <span class="count" id="list-count"></span>
+        <div class="filters">
+          <input type="search" id="q" placeholder="Search title or area" aria-label="Search listings">
+          <input type="number" id="maxp" placeholder="Max £" aria-label="Maximum price" style="width:82px" min="0">
+          <select id="scope" aria-label="Which listings">
+            <option value="all" selected>All seen</option>
+            <option value="new">Alerted only</option>
+          </select>
+        </div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Price</th><th>Listing</th><th>Area</th><th>Found</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" hidden>
+        <strong>No listings yet</strong>
+        <span id="empty-hint">Press Start to begin watching.</span>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="History">
+      <div class="head"><h2>Recent polls</h2><span class="count" id="bars-count"></span></div>
+      <div class="bars" id="bars" role="img" aria-label="Bar chart of new listings per poll"></div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>new listings</span>
+        <span><i style="background:var(--line)"></i>none</span>
+        <span><i style="background:var(--bad)"></i>failed</span>
+      </div>
+      <hr class="sep">
+      <div class="head"><h2>Search</h2></div>
+      <div class="settings">
+        <dl id="settings"></dl>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let S = { status: null, settings: null, timer: null };
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+function money(p) {
+  return p == null ? "—" : "£" + p.toLocaleString("en-GB");
+}
+
+function ago(iso) {
+  if (!iso) return "—";
+  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (d < 0) return "just now";
+  if (d < 60) return Math.round(d) + "s ago";
+  if (d < 3600) return Math.round(d / 60) + "m ago";
+  if (d < 86400) return Math.round(d / 3600) + "h ago";
+  return Math.round(d / 86400) + "d ago";
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let detail = r.status + " " + r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+function renderStatus(s) {
+  S.status = s;
+  const st = s.state;
+  const pill = $("state-pill");
+  pill.className = "pill " + st;
+  pill.textContent = { stopped: "Stopped", starting: "Starting…", running: "Running",
+                       stopping: "Stopping…", failed: "Stopped (error)" }[st] || st;
+
+  const running = st === "running" || st === "starting";
+  $("btn-start").disabled = st === "running" || st === "starting" || st === "stopping";
+  $("btn-stop").disabled = !(st === "running" || st === "starting");
+  $("btn-poll").disabled = st !== "running";
+
+  $("banner-session").hidden = !s.session_expired;
+  $("state-note").textContent =
+    s.last_error && !s.session_expired ? s.last_error :
+    s.started_at ? "since " + ago(s.started_at) : "Not started";
+
+  const stats = s.stats || {};
+  $("last-poll").textContent = s.last_poll_at ? ago(s.last_poll_at) : "never";
+  if (st === "running" && s.next_poll_in != null) {
+    $("next-poll").textContent = "next in " + Math.round(s.next_poll_in) + "s";
+  } else if (st === "stopped" || st === "failed") {
+    $("next-poll").textContent = "not polling";
+  } else {
+    $("next-poll").textContent = "polling now";
+  }
+
+  $("total").textContent = (stats.total || 0).toLocaleString("en-GB");
+  $("range").textContent =
+    stats.min_price != null ? money(stats.min_price) + " – " + money(stats.max_price) : " ";
+  $("alerted").textContent = (stats.alerted || 0).toLocaleString("en-GB");
+  $("polls-run").textContent = (s.poll_count || 0).toLocaleString("en-GB");
+  $("failure-note").textContent =
+    s.consecutive_failures > 0 ? s.consecutive_failures + " failing in a row" : "this session";
+}
+
+async function loadListings() {
+  const scope = $("scope").value;
+  const q = $("q").value;
+  const maxp = $("maxp").value;
+  const params = new URLSearchParams({ only_new: scope === "new" ? "true" : "false", limit: "300" });
+  if (q) params.set("q", q);
+  if (maxp) params.set("max_price", maxp);
+  const data = await api("/api/listings?" + params);
+
+  const body = $("rows");
+  body.innerHTML = "";
+  for (const it of data.items) {
+    const tr = document.createElement("tr");
+    const isNew = it.notified === 1;
+    tr.innerHTML = `
+      <td class="price">${money(it.price)}</td>
+      <td class="title"><a href="${it.url}" target="_blank" rel="noopener noreferrer"></a>${isNew ? '<span class="tag">alerted</span>' : ""}</td>
+      <td class="loc"></td>
+      <td class="when" title="${it.first_seen}">${ago(it.first_seen)}</td>`;
+    tr.querySelector("a").textContent = it.title;
+    tr.querySelector(".loc").textContent = it.location || "—";
+    body.appendChild(tr);
+  }
+  $("list-count").textContent = data.total ? data.total + " shown" : "";
+  $("empty").hidden = data.items.length > 0;
+  // Say which kind of empty this is: nothing scraped yet, or nothing matching.
+  if (scope === "new") {
+    $("empty").querySelector("strong").textContent = "No alerts sent yet";
+    $("empty-hint").textContent = "Listings you've been alerted about appear here. "
+      + (S.status && S.status.state === "running"
+          ? "The first run records existing listings silently, so alerts begin with the next new one."
+          : "Switch to “All seen” to view everything scraped so far.");
+  } else {
+    $("empty").querySelector("strong").textContent = "No listings yet";
+    $("empty-hint").textContent = S.status && S.status.state === "running"
+      ? "Nothing matches these filters yet. New matches appear here as they arrive."
+      : "Press Start to begin watching.";
+  }
+}
+
+async function loadPolls() {
+  const data = await api("/api/polls?limit=40");
+  const bars = $("bars");
+  bars.innerHTML = "";
+  const items = data.items.slice().reverse();
+  const peak = Math.max(1, ...items.map((p) => p.new_count));
+  for (const p of items) {
+    const b = document.createElement("div");
+    const cls = p.ok ? (p.new_count > 0 ? "bar" : "bar zero") : "bar fail";
+    b.className = cls;
+    const h = p.ok ? (p.new_count > 0 ? 8 + (p.new_count / peak) * 42 : 3) : 48;
+    b.style.height = h + "px";
+    const label = p.ok
+      ? `${p.parsed} parsed, ${p.new_count} new`
+      : `failed: ${p.error || "unknown error"}`;
+    b.title = new Date(p.finished_at || p.started_at).toLocaleTimeString() + " — " + label;
+    bars.appendChild(b);
+  }
+  $("bars-count").textContent = items.length ? "last " + items.length : "";
+}
+
+function renderSettings(st) {
+  S.settings = st;
+  const dl = $("settings");
+  dl.innerHTML = "";
+  const rows = [
+    ["Query", st.query],
+    ["Area", st.city_slug + " · " + st.radius_km + " km"],
+    ["Price band", money(st.min_price) + " – " + money(st.max_price)],
+    ["Interval", st.interval_seconds + "s ± " + st.jitter_seconds + "s"],
+    ["Channels", [st.telegram && "Telegram", st.discord && "Discord"].filter(Boolean).join(" + ") || "none"],
+    ["Window", st.headless ? "headless" : "visible"],
+  ];
+  for (const [k, v] of rows) {
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  $("search-sub").textContent = `${st.query} · ${st.city_slug} · ${money(st.min_price)}–${money(st.max_price)}`;
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/status");
+    const before = S.status ? S.status.stats.total : null;
+    renderStatus(s);
+    if (before !== null && s.stats.total !== before) loadListings();
+  } catch (e) {
+    const pill = $("state-pill");
+    pill.className = "pill failed";
+    pill.textContent = "Dashboard offline";
+    $("state-note").textContent = e.message;
+  }
+}
+
+async function act(btn, path, okMsg) {
+  const buttons = [...document.querySelectorAll("button")];
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const r = await api(path, { method: "POST" });
+    toast(okMsg(r));
+    await refresh();
+    await new Promise((res) => setTimeout(res, 600));
+    await refresh();
+  } catch (e) {
+    toast("Failed: " + e.message);
+  } finally {
+    await refresh();
+  }
+}
+
+$("btn-start").onclick = () => act($("btn-start"), "/api/start", () => "Watcher started");
+$("btn-stop").onclick = () => act($("btn-stop"), "/api/stop", () => "Watcher stopped");
+$("btn-poll").onclick = () => act($("btn-poll"), "/api/poll-now", () => "Polling now");
+$("scope").onchange = loadListings;
+$("maxp").oninput = () => { clearTimeout(S.timer); S.timer = setTimeout(loadListings, 220); };
+$("q").oninput = () => { clearTimeout(S.timer); S.timer = setTimeout(loadListings, 220); };
+
+(async function init() {
+  try { await api("/api/settings").then(renderSettings); } catch {}
+  await refresh();
+  await loadListings();
+  await loadPolls();
+  setInterval(refresh, 2000);
+  setInterval(loadPolls, 15000);
+})();
+</script>
+</body>
+</html>

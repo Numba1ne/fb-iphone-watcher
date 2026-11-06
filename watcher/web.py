@@ -1,0 +1,176 @@
+"""Local dashboard: static page plus a small JSON API.
+
+Bound to 127.0.0.1 and never exposed. The Host-header check blocks DNS
+rebinding, where a malicious page resolves its own domain to 127.0.0.1 to
+reach this server with the browser's privileges.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from .models import AppConfig
+from .runner import WatcherRunner
+from .store import Store
+
+log = logging.getLogger(__name__)
+
+STATIC = Path(__file__).resolve().parent / "static"
+ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _host_ok(request: Request) -> bool:
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    return host in ALLOWED_HOSTS
+
+
+def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if autostart:
+            await runner.start()
+        yield
+        await runner.stop(timeout=15)
+
+    api = FastAPI(title="iPhone Watcher", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+    @api.middleware("http")
+    async def guard(request: Request, call_next):
+        if not _host_ok(request):
+            return JSONResponse({"detail": "Bad host"}, status_code=421)
+        return await call_next(request)
+
+    @api.get("/", response_class=HTMLResponse)
+    async def index() -> HTMLResponse:
+        # Read per request so edits to the page show on reload without a restart.
+        # No-cache: a stale dashboard against a changed API is a confusing bug.
+        return HTMLResponse(
+            (STATIC / "index.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @api.get("/api/status")
+    async def status() -> dict:
+        s = runner.status.as_dict()
+        s["result"] = None
+        with Store(cfg.db_path) as store:
+            s["stats"] = store.stats()
+        return s
+
+    @api.get("/api/listings")
+    async def listings(
+        limit: int = Query(100, ge=1, le=500),
+        only_new: bool = False,
+        max_price: int | None = None,
+        min_price: int | None = None,
+        q: str = "",
+    ) -> dict:
+        with Store(cfg.db_path) as store:
+            rows = store.recent_listings(limit=500, only_new=only_new)
+        needle = q.strip().lower()
+        out = []
+        for row in rows:
+            if max_price is not None and (row["price"] is None or row["price"] > max_price):
+                continue
+            if min_price is not None and (row["price"] is None or row["price"] < min_price):
+                continue
+            if needle and needle not in (row["title"] or "").lower() and needle not in (
+                row["location"] or ""
+            ).lower():
+                continue
+            out.append(row)
+        return {"items": out[:limit], "total": len(out)}
+
+    @api.get("/api/polls")
+    async def polls(limit: int = Query(40, ge=1, le=200)) -> dict:
+        with Store(cfg.db_path) as store:
+            return {"items": store.recent_polls(limit)}
+
+    @api.get("/api/settings")
+    async def settings() -> dict:
+        s = cfg.search
+        return {
+            "query": s.query,
+            "city_slug": s.city_slug,
+            "radius_km": s.radius_km,
+            "min_price": s.min_price,
+            "max_price": s.max_price,
+            "interval_seconds": cfg.interval_seconds,
+            "jitter_seconds": cfg.jitter_seconds,
+            "max_cards": cfg.max_cards,
+            "headless": cfg.headless,
+            "telegram": cfg.telegram,
+            "discord": cfg.discord,
+            "first_run_silent": cfg.first_run_silent,
+            "require_any": list(cfg.require_any),
+            "exclude": list(cfg.exclude),
+            "search_url": s.build_url(),
+        }
+
+    @api.post("/api/start")
+    async def start() -> dict:
+        if runner.running:
+            return {"started": False, "state": runner.status.state, "reason": "already running"}
+        # Starting clears a stale session error so the UI doesn't keep showing it
+        # after the user has run --login.
+        await runner.start()
+        return {"started": True, "state": runner.status.state}
+
+    @api.post("/api/stop")
+    async def stop() -> dict:
+        was = runner.running
+        await runner.stop()
+        return {"stopped": was, "state": runner.status.state}
+
+    @api.post("/api/poll-now")
+    async def poll_now() -> dict:
+        if not runner.running:
+            raise HTTPException(409, "The watcher is stopped. Start it first.")
+        runner.trigger_poll()
+        return {"ok": True}
+
+    @api.get("/api/export.csv")
+    async def export_csv() -> JSONResponse:
+        import csv
+        import io
+
+        with Store(cfg.db_path) as store:
+            rows = store.recent_listings(limit=5000, only_new=True)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["id", "title", "price", "location", "url", "first_seen"])
+        for row in rows:
+            writer.writerow(
+                [row["id"], row["title"], row["price"], row["location"], row["url"], row["first_seen"]]
+            )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+        return JSONResponse(
+            {"csv": buffer.getvalue(), "filename": f"iphone-listings-{stamp}.csv"}
+        )
+
+    return api
+
+
+async def serve(cfg: AppConfig, runner: WatcherRunner, *, port: int = 8765) -> None:
+    import uvicorn
+
+    api = create_app(cfg, runner)
+    config = uvicorn.Config(
+        api,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        lifespan="on",
+    )
+    server = uvicorn.Server(config)
+    log.info("Dashboard: http://127.0.0.1:%d", port)
+    await server.serve()

@@ -123,8 +123,38 @@ have the page HTML and a screenshot.
 Then run it for real:
 
 ```bash
-python main.py
+python main.py                # watch in the terminal
+python main.py --dashboard    # or: watch from a browser (recommended)
 ```
+
+---
+
+## The dashboard
+
+```bash
+python main.py --dashboard
+```
+
+Opens a page at **http://127.0.0.1:8765** and starts watching immediately.
+Use `--port 9000` if something else already has 8765.
+
+It shows the watcher's state, the last poll and countdown, and every listing
+scraped, with live search and a price filter. Start, Stop and Poll now are in
+the top right, so you can restart without touching a terminal. Below the
+listings: a bar per recent poll (new listings, none, or failed) and the
+current search settings.
+
+The first-run silence rule still applies: on a fresh database the listings
+appear under **All seen** but you receive no alerts until something genuinely
+new arrives. "Alerts sent" counts only those.
+
+The dashboard and the bot are the same process — closing it stops the
+watcher, which is why the state shown is always the real state.
+
+It is bound to `127.0.0.1`, so it is reachable only from this PC. A Host-header
+check rejects requests arriving under any other name, which blocks malicious
+web pages from reaching it through DNS rebinding. There is no password because
+nothing outside this machine can connect.
 
 ---
 
@@ -244,12 +274,15 @@ else is anchored to that.
 
 | File | Responsibility |
 | --- | --- |
-| [main.py](main.py) | CLI, poll loop, first-run handling, session-expiry alert |
+| [main.py](main.py) | CLI: terminal mode, dashboard mode, login, test-notify |
+| [watcher/runner.py](watcher/runner.py) | The polling loop as a startable task; single source of truth for state |
+| [watcher/web.py](watcher/web.py) | Dashboard API and the static page |
+| [watcher/static/index.html](watcher/static/index.html) | The dashboard page (self-contained, no build step) |
 | [watcher/config.py](watcher/config.py) | YAML + `.env` loading and validation |
 | [watcher/browser.py](watcher/browser.py) | Persistent Chromium profile, login-wall detection |
 | [watcher/marketplace.py](watcher/marketplace.py) | Search URL, card parsing, `SELECTORS`, debug dumps |
 | [watcher/filters.py](watcher/filters.py) | Price band + include/exclude keywords |
-| [watcher/store.py](watcher/store.py) | SQLite seen-listings store |
+| [watcher/store.py](watcher/store.py) | SQLite seen-listings store and poll history |
 | [watcher/notify.py](watcher/notify.py) | Telegram + Discord with retries |
 
 ### Tests
