@@ -57,7 +57,6 @@ async def run_dashboard(cfg: AppConfig, *, port: int) -> int:
     from watcher.web import serve
 
     runner = WatcherRunner(cfg)
-    log.info("Dashboard on http://127.0.0.1:%d — Ctrl+C to stop", port)
     await serve(cfg, runner, port=port)
     return 0
 
@@ -99,6 +98,41 @@ async def do_test_notify(cfg: AppConfig) -> int:
     return 1
 
 
+def _port_available(port: int) -> bool:
+    """True if nothing is already bound to the dashboard port on loopback."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # On Windows SO_REUSEADDR lets a second bind succeed silently, so a
+        # reuse-based check always says "free". Exclusive-use is the only
+        # option that actually reports a port already in service.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def _explain_and_wait(message: str, exit_code: int) -> int:
+    """Print a problem in a way that survives a double-clicked window.
+
+    Launched from Explorer, the console vanishes the moment the process exits,
+    which makes a terse config error look like "the dashboard just doesn't
+    work". Pause only on a real console so piped/CI runs don't hang.
+    """
+    print(message, file=sys.stderr, flush=True)
+    if sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close…")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return exit_code
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch Facebook Marketplace for new iPhone listings.")
     parser.add_argument("--dashboard", action="store_true", help="Run the web dashboard (also starts watching)")
@@ -118,8 +152,13 @@ def main() -> int:
     try:
         cfg = config_loader.load(args.config)
     except config_loader.ConfigError as exc:
-        print(f"\nConfiguration problem:\n  {exc}\n", file=sys.stderr)
-        return 1
+        hint = ""
+        if args.dashboard:
+            hint = (
+                "\nThe dashboard did not start, so the browser has nothing to connect to.\n"
+                f"Fix the problem above, then run this again."
+            )
+        return _explain_and_wait(f"\nConfiguration problem:\n  {exc}\n{hint}", 1)
 
     try:
         cfg = cfg.with_overrides(
@@ -128,8 +167,15 @@ def main() -> int:
             debug=args.debug or None,
         )
     except ValueError as exc:
-        print(f"\n{exc}\n", file=sys.stderr)
-        return 1
+        return _explain_and_wait(f"\n{exc}\n", 1)
+
+    if args.dashboard and not _port_available(args.port):
+        return _explain_and_wait(
+            f"\nPort {args.port} is already in use — another copy may already be running.\n"
+            f"Open http://127.0.0.1:{args.port} to check, or start this one with "
+            f"--port {args.port + 1}.\n",
+            1,
+        )
 
     configure_logging(cfg.log_path, verbose=args.verbose or args.debug)
 

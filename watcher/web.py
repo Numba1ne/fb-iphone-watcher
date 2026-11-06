@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,7 +160,9 @@ def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True)
     return api
 
 
-async def serve(cfg: AppConfig, runner: WatcherRunner, *, port: int = 8765) -> None:
+async def serve(
+    cfg: AppConfig, runner: WatcherRunner, *, port: int = 8765, open_browser: bool = True
+) -> None:
     import uvicorn
 
     api = create_app(cfg, runner)
@@ -172,5 +175,25 @@ async def serve(cfg: AppConfig, runner: WatcherRunner, *, port: int = 8765) -> N
         lifespan="on",
     )
     server = uvicorn.Server(config)
-    log.info("Dashboard: http://127.0.0.1:%d", port)
-    await server.serve()
+    url = f"http://127.0.0.1:{port}"
+
+    async def open_when_ready() -> None:
+        # Poll the socket rather than sleeping a guessed amount, so the tab
+        # never opens onto a connection refused.
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.1)
+        log.info("Dashboard: %s", url)
+        print(f"\n  Dashboard: {url}   (Ctrl+C to stop)\n", flush=True)
+        if open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:  # noqa: BLE001 - a browser failing must not stop the server
+                log.warning("Could not open a browser automatically — visit %s", url)
+
+    opener = asyncio.create_task(open_when_ready())
+    try:
+        await server.serve()
+    finally:
+        opener.cancel()
