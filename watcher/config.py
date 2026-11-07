@@ -136,12 +136,18 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         override_url=str(_get(search, "search_url_override", "")).strip(),
     )
 
-    # `notifications.max_age_minutes` is the documented key. The older
-    # `freshness.max_listed_minutes` spelling is still honoured so an existing
-    # config.yaml keeps working; null or 0 disables the gate either way.
-    raw_max_age = notifications.get("max_age_minutes")
+    # `notifications.max_age_minutes` is the documented key, defaulting to 8
+    # minutes when the key is absent. An explicit `null` or 0 disables the
+    # gate — the difference matters: a config that never mentions the key
+    # should still filter, while one that sets it to null is saying "off".
+    # The older `freshness.max_listed_minutes` spelling is still honoured so an
+    # existing config.yaml keeps working.
+    if "max_age_minutes" in notifications:
+        raw_max_age = notifications["max_age_minutes"]
+    else:
+        raw_max_age = freshness.get("max_listed_minutes", 8)
     if raw_max_age is None:
-        raw_max_age = freshness.get("max_listed_minutes", 0)
+        raw_max_age = 0
     max_listed = _as_int(raw_max_age, "notifications.max_age_minutes") or 0
     if max_listed < 0:
         raise ConfigError("notifications.max_age_minutes must be 0 or more.")

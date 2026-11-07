@@ -193,9 +193,11 @@ every `restart_browser_every` polls so it never accumulates state. Watch the
 The freshness gate is what turns "new to us" into "actually new". The
 search card badges every listing "Just listed", so when a listing is new the
 bot opens its detail page once to read the real age, and stays quiet unless
-it is within `notifications.max_age_minutes`. Listings whose age cannot be read
-are alerted anyway rather than silently dropped. An older config may still say
-`freshness.max_listed_minutes`; that spelling is honoured too.
+it is within `notifications.max_age_minutes` (default 8; `0` or `null` turns
+the gate off). An older config may still say `freshness.max_listed_minutes`;
+that spelling is honoured too. Coarse wording — "today", "yesterday" — counts
+as too old. Listings whose age genuinely cannot be read are alerted anyway
+rather than silently dropped, so a markup change fails loud, not silent.
 
 **Changing location:** set `city_slug`, `latitude` and `longitude` together.
 Find coordinates by right-clicking a spot in Google Maps — the first number is

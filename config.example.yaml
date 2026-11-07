@@ -73,14 +73,15 @@ notifications:
   # On the very first run, record existing listings without alerting on them.
   first_run_silent: true
 
-  # Only alert if the listing is at most this many minutes old. 0 (or null)
-  # disables the filter and alerts on everything new.
+  # Only alert if the listing is at most this many minutes old. Defaults to 8;
+  # 0 (or null) disables the filter and alerts on everything new.
   #
   # When a listing is new to us, the bot opens its detail page once to read the
   # real age — the search card badges everything "Just listed". The listing is
   # still recorded and shown on the dashboard when it is too old; only the
-  # Telegram/Discord alert is suppressed. If the age cannot be read it alerts
-  # anyway, so a parsing change never silently swallows listings.
+  # Telegram/Discord alert is suppressed. Coarse wording ("today",
+  # "yesterday") counts as too old. If the age genuinely cannot be read it
+  # alerts anyway, so a parsing change never silently swallows listings.
   max_age_minutes: 8
 
   # Saved-search probe. Requires a saved search created on the account

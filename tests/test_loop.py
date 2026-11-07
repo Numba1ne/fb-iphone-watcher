@@ -285,7 +285,7 @@ async def main() -> int:
         check("stale listing marked not alerted", row["notified"] == 0)
         check(
             "stale skip is logged with its age",
-            any(m.startswith("SKIPPED (too old: 20 minutes)") for m in logs),
+            any(m.startswith("SKIPPED (too old: 20 min)") for m in logs),
         )
 
     # 9. The gate lets a fresh listing through.
@@ -304,7 +304,7 @@ async def main() -> int:
         check("fresh listing alerted", [x.id for x in sent] == ["1"])
         check(
             "alert is logged with the listing's age",
-            any(m.startswith("ALERT (age: 3 minutes)") for m in logs),
+            any(m.startswith("ALERT (age: 3 min)") for m in logs),
         )
 
     print()

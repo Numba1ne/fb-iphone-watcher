@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from watcher import filters  # noqa: E402
+from watcher import config, filters  # noqa: E402
 from watcher.marketplace import _parse_location, _parse_title  # noqa: E402
 from watcher.models import Listing, SearchSpec, age_minutes  # noqa: E402
 from watcher.store import Store  # noqa: E402
@@ -252,10 +252,39 @@ def test_age_minutes_units():
     assert age_minutes("Listed 8 hours ago") == 480
 
 
-def test_age_minutes_unknown_when_coarse():
-    # "today" is too coarse to gate on, so it must not read as zero.
-    assert age_minutes("today") is None
+def test_age_minutes_coarse_wording_is_too_old():
+    # "today" and "yesterday" are both older than any sane freshness limit, so
+    # they must gate as too old — but never as zero.
+    assert age_minutes("today") == 24 * 60
+    assert age_minutes("yesterday") == 24 * 60
     assert age_minutes("") is None
+
+
+def _gate_minutes_from(extra: str = "") -> int:
+    """Resolve `max_listed_minutes` from a throwaway config file.
+
+    Both alert channels are off so the loader's credentials check doesn't
+    fire; `extra` is appended inside the notifications block.
+    """
+    text = (
+        "search:\n  city_slug: london\n  query: iphone\n"
+        "notifications:\n  telegram: false\n  discord: false\n" + extra
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.yaml"
+        path.write_text(text)
+        return config.load(path).max_listed_minutes
+
+
+def test_max_age_minutes_defaults_to_eight_and_null_disables():
+    # Absent key: the filter is on at the documented default.
+    assert _gate_minutes_from() == 8
+    # An explicit null means "off".
+    assert _gate_minutes_from("  max_age_minutes: null\n") == 0
+    # So does 0.
+    assert _gate_minutes_from("  max_age_minutes: 0\n") == 0
+    # Any positive value is honoured.
+    assert _gate_minutes_from("  max_age_minutes: 3\n") == 3
 
 
 def test_secondary_url_changes_radius_and_drops_ceiling():

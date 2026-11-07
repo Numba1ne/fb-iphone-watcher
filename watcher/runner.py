@@ -445,16 +445,17 @@ class WatcherRunner:
                         ):
                             store.set_notified(listing.id, False)
                             log.info(
-                                "SKIPPED (too old: %d minutes) \u2013 %s \u2013 %s",
+                                "SKIPPED (too old: %d min)  %s  %s  (%s)",
                                 minutes,
                                 listing.title,
                                 listing.price_text,
+                                listing.location,
                             )
                             continue
 
                     log.info(
-                        "ALERT (age: %s) \u2013 %s \u2013 %s  (%s)",
-                        "unknown" if minutes is None else f"{minutes} minutes",
+                        "ALERT (age: %s)  %s  %s  (%s)",
+                        "unknown" if minutes is None else f"{minutes} min",
                         listing.title,
                         listing.price_text,
                         listing.location,

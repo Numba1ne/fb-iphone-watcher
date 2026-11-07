@@ -46,9 +46,11 @@ def _estimate_listed_at(listed_text: str, now: datetime) -> str | None:
 def age_minutes(listed_text: str) -> int | None:
     """Estimate a listing's age in whole minutes from Facebook's wording.
 
-    Returns None when the wording is too coarse to gate on ("today"). This is
-    what the freshness gate compares against, so an unknown age must never be
-    silently treated as zero.
+    "today" and "yesterday" are deliberately mapped to a day: both mean the
+    listing is older than any sane freshness threshold, so the gate must read
+    them as too old rather than as unknown. None is reserved for wording we
+    genuinely cannot parse — that must never be silently treated as zero, or
+    a parsing change would alert on the whole backlog.
     """
     if not listed_text:
         return None
@@ -56,7 +58,7 @@ def age_minutes(listed_text: str) -> int | None:
     if low in ("just now", "just listed"):
         return 0
     if low == "today":
-        return None
+        return 24 * 60
     if low == "yesterday":
         return 24 * 60
     match = _AGO.search(low)
@@ -216,7 +218,7 @@ class AppConfig:
     notifications_probe_every: int = 2
     # Freshness gate: skip the alert when the detail page says the listing is
     # older than this many minutes. 0 disables the gate.
-    max_listed_minutes: int = 0
+    max_listed_minutes: int = 8
     # A second, slightly different search merged into every poll.
     second_search: bool = False
     second_search_radius_km: int | None = None
