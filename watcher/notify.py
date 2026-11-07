@@ -41,6 +41,13 @@ class Notifier:
         if self.cfg.discord:
             tasks.append(self._discord_listing(listing))
 
+        if not tasks:
+            # No channel has credentials, so there is nothing to send to. Say
+            # so once per listing rather than failing silently in a way that
+            # looks like a broken watcher.
+            log.warning("No delivery channel configured — %s not sent", listing.title)
+            return False
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = False
         for result in results:
@@ -119,10 +126,11 @@ class Notifier:
         return await self._post(url, payload, label="Telegram")
 
     async def _discord_message(self, text: str) -> bool:
-        if self.cfg.telegram:
-            # Keep Discord readable: strip the handful of tags we emit.
-            for tag in ("<b>", "</b>", "<code>", "</code>"):
-                text = text.replace(tag, "")
+        # Discord has no HTML, so strip the handful of tags we emit. This must
+        # not depend on Telegram being enabled: a Discord-only setup would
+        # otherwise show literal <b> and <code> in the alert.
+        for tag in ("<b>", "</b>", "<code>", "</code>"):
+            text = text.replace(tag, "")
         return await self._post(
             self.cfg.discord_webhook_url, {"content": text}, label="Discord"
         )
@@ -137,7 +145,14 @@ class Notifier:
                     "url": listing.url,
                     "description": f"**{listing.price_text}**",
                     "color": colour,
-                    "fields": [{"name": "Location", "value": listing.location, "inline": True}],
+                    "fields": [
+                        {"name": "Location", "value": listing.location, "inline": True},
+                        {
+                            "name": "Listed",
+                            "value": listing.listed_display,
+                            "inline": True,
+                        },
+                    ],
                     "footer": {"text": f"Seen at {now}"},
                 }
             ]
@@ -152,6 +167,7 @@ def _telegram_text(listing: Listing) -> str:
         f"🚨 <b>New iPhone listing — {html.escape(listing.price_text)}</b>\n"
         f"📱 {html.escape(listing.title)}\n"
         f"📍 {html.escape(listing.location)}\n"
+        f"🕒 Listed {html.escape(listing.listed_display)}\n"
         f"🔗 {listing.url}\n"
         f"<i>seen {datetime.now():%H:%M:%S}</i>"
     )

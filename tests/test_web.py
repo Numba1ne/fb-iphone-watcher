@@ -12,6 +12,7 @@ import asyncio
 import sys
 import tempfile
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -111,6 +112,36 @@ def main() -> int:
                 searched = client.get("/api/listings?q=epsom").json()
                 check(f"search matches location (got {searched['total']})", searched["total"] == 1)
                 check("listings newest first", all_rows["items"][0]["id"] == "12")
+                # total must count every match, not just the rows in the page.
+                paged = client.get("/api/listings?limit=1").json()
+                check(
+                    f"total counts beyond the page (got {paged['total']})",
+                    len(paged["items"]) == 1 and paged["total"] == 3,
+                )
+                wildcard = client.get("/api/listings?q=%25").json()
+                check("search treats % literally", wildcard["total"] == 0)
+
+                # --- recency window: the first-run backlog must be hideable
+                now = datetime.now(timezone.utc)
+                with Store(cfg.db_path) as store:
+                    store.claim(
+                        Listing.from_card("20", "iPhone 16 fresh", 500, "London"),
+                        now=(now - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                        alert=True,
+                    )
+                    store.claim(
+                        Listing.from_card("21", "iPhone 16 stale", 500, "London"),
+                        now=(now - timedelta(hours=5)).isoformat(timespec="seconds"),
+                        alert=True,
+                    )
+                recent = client.get("/api/listings?since_hours=2").json()
+                ids = {i["id"] for i in recent["items"]}
+                check("since_hours keeps a fresh listing", "20" in ids)
+                check("since_hours hides an old listing", "21" not in ids)
+                # A wide window must bring the old one back, so the filter is a
+                # window and not a silent drop.
+                wide = client.get("/api/listings?since_hours=1000").json()
+                check("a wide since_hours includes the old listing", "21" in {i["id"] for i in wide["items"]})
 
                 # --- polls
                 p = client.get("/api/polls").json()["items"]
@@ -141,8 +172,19 @@ def main() -> int:
                 check("status flips back to stopped", client.get("/api/status").json()["state"] == "stopped")
 
                 # --- export
-                csv = client.get("/api/export.csv").json()["csv"]
-                check("csv has a header and alerted rows only", csv.startswith("id,title") and len(csv.splitlines()) == 3)
+                r = client.get("/api/export.csv")
+                check(
+                    "csv is served as a download",
+                    r.headers["content-type"].startswith("text/csv")
+                    and "attachment" in r.headers.get("content-disposition", ""),
+                )
+                csv = r.text
+                with Store(cfg.db_path) as store:
+                    alerted_total = store.stats()["alerted"]
+                check(
+                    "csv has a header and alerted rows only",
+                    csv.startswith("id,title") and len(csv.splitlines()) == alerted_total + 1,
+                )
 
     print()
     if failures:

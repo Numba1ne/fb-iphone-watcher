@@ -50,6 +50,13 @@ def page_html() -> str:
 <a href="/marketplace/item/555/">
   <div><img alt="iPhone 12 mini" src="x.png" />
     <span>£320 · Dartford, London</span></div>
+</a>
+<a href="/marketplace/item/666/">
+  <div><img alt="iPhone 16 Pro in Brighton and Hove" src="x.png" />
+    <span>Just listed</span>
+    <span>£400</span>
+    <span>iPhone 16 Pro</span>
+    <span>Brighton and Hove</span></div>
 </a>"""
     return f"<html><body><div role='main'>{cards}</div></body></html>"
 
@@ -72,7 +79,7 @@ async def main() -> int:
         if not condition:
             failures.append(label)
 
-    check(f"parsed 5 unique cards (got {len(listings)})", len(listings) == 5)
+    check(f"parsed 6 unique cards (got {len(listings)})", len(listings) == 6)
     check(f"unparsed count is 0 (got {unparsed})", unparsed == 0)
     check("duplicate id deduped", len([x for x in listings if x.id == "111"]) == 1)
 
@@ -93,6 +100,12 @@ async def main() -> int:
     dotted = by_id.get("555")
     check("dot-separated same-span location", dotted is not None and dotted.location == "Dartford, London")
     check("dot-separated price", dotted is not None and dotted.price == 320)
+
+    # The live card shape: badge, price, title, location.
+    real = by_id.get("666")
+    check("real card: location is the area", real is not None and real.location == "Brighton and Hove")
+    check("real card: title drops the area suffix", real is not None and real.title == "iPhone 16 Pro")
+    check("real card: price parsed", real is not None and real.price == 400)
 
     print()
     if failures:

@@ -79,8 +79,13 @@ async def main() -> int:
     app.router.add_post("/401", _unauthorized)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "127.0.0.1", 8765).start()
-    ok_url = "http://127.0.0.1:8765/ok"
+    # Port 0: let the OS pick a free port. A fixed 8765 collides with a running
+    # dashboard, which would make this suite fail for an unrelated reason.
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    ok_url = f"{base_url}/ok"
     failures = []
 
     def check(label: str, condition: bool) -> None:
@@ -113,13 +118,13 @@ async def main() -> int:
 
     # c) 503 retried, then succeeds
     attempts["flaky"] = 0
-    flaky = base_config(discord=True, discord_webhook_url="http://127.0.0.1:8765/flaky")
+    flaky = base_config(discord=True, discord_webhook_url=f"{base_url}/flaky")
     async with Notifier(flaky) as nt:
         result = await nt._discord_message("hi")
     check(f"retries 503 and succeeds (attempts={attempts['flaky']})", result and attempts["flaky"] == 3)
 
     # d) 401 fails fast, no retry
-    bad = base_config(discord=True, discord_webhook_url="http://127.0.0.1:8765/401")
+    bad = base_config(discord=True, discord_webhook_url=f"{base_url}/401")
     started = time.monotonic()
     async with Notifier(bad) as nt:
         result = await nt._discord_message("hi")
@@ -140,6 +145,46 @@ async def main() -> int:
         check("discord payload actually arrived", received[-1]["embeds"][0]["url"] == LISTING.url)
     finally:
         notify_mod.Notifier._telegram_message = original
+
+    # f) A Discord-only setup still strips the HTML tags we emit.
+    dc_only = base_config(telegram=False, discord=True, discord_webhook_url=ok_url)
+    async with Notifier(dc_only) as nt:
+        await nt._discord_message(
+            "<b>Facebook session expired</b>\n<code>python main.py --login</code>"
+        )
+    content = received[-1]["content"]
+    check(
+        "discord-only alert has no raw tags",
+        "<b>" not in content and "<code>" not in content,
+    )
+
+    # g) alert_session_expired reaches a channel with notification: true even
+    #    though no token is configured — this is the "test both channels
+    #    without credentials" path the README describes.
+    no_creds = base_config(telegram=False, discord=True, discord_webhook_url="")
+    captured: list[str] = []
+    original_telegram, original_discord = (
+        notify_mod.Notifier._telegram_message,
+        notify_mod.Notifier._discord_message,
+    )
+
+    async def fake_telegram(self: Notifier, text: str) -> bool:
+        captured.append("telegram")
+        return True
+
+    async def fake_discord(self: Notifier, text: str) -> bool:
+        captured.append("discord")
+        return True
+
+    notify_mod.Notifier._telegram_message = fake_telegram
+    notify_mod.Notifier._discord_message = fake_discord
+    try:
+        async with Notifier(no_creds) as nt:
+            await nt.alert_session_expired("test")
+    finally:
+        notify_mod.Notifier._telegram_message = original_telegram
+        notify_mod.Notifier._discord_message = original_discord
+    check(f"session alert sent with no credentials (got {captured})", captured == ["discord"])
 
     await runner.cleanup()
     print()

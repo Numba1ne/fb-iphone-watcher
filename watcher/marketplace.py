@@ -29,13 +29,36 @@ SELECTORS = {
 
 _ITEM_ID = re.compile(r"/marketplace/item/(\d+)")
 _PRICE = re.compile(r"£\s*([\d,]+)")
-_NON_PRICE_LINE = re.compile(r"^(£|free$|sponsored|listed|sold)", re.IGNORECASE)
+# "listed" only counts as a badge when a time follows it ("Listed 2 hours ago",
+# "Listed just now"); a title that merely starts with the word is a real title.
+_NON_PRICE_LINE = re.compile(
+    r"^(£|free$|sponsored|just listed|listed\s+(?:just|today|yesterday|\d)|sold)",
+    re.IGNORECASE,
+)
+# The "Just listed" / "Listed 2 hours ago" badge. Anchored to the whole line so
+# a title that merely contains the word "listed" is not read as a timestamp.
+_LISTED_BADGE = re.compile(
+    r"^(?:listed\s+)?"
+    r"(just listed|just now|today|yesterday|\d+\s*(?:second|minute|hour|day|week)s?\s+ago)"
+    r"$",
+    re.IGNORECASE,
+)
+# The detail page states the real age ("Listed 41 minutes ago in Sunderland"),
+# unlike the card, which badges everything "Just listed".
+_LISTED_DETAIL = re.compile(
+    r"Listed\s+(just now|today|yesterday|\d+\s*(?:second|minute|hour|day|week)s?\s+ago)",
+    re.IGNORECASE,
+)
 
 
 async def open_search(session: BrowserSession, cfg: AppConfig) -> Page:
     """Open the configured search URL and confirm we landed on results."""
     page = await session.new_page()
     url = cfg.search.build_url()
+    # Facebook serves this page from an edge cache. A unique parameter makes
+    # each poll a distinct request, so a poll can never be handed a snapshot
+    # older than the one before it. Facebook ignores the parameter itself.
+    url += ("&" if "?" in url else "?") + f"_cb={int(time.time() * 1000)}"
     log.debug("Navigating to %s", url)
 
     try:
@@ -103,11 +126,30 @@ def _parse_title(text_lines: list[str], image_alt: str) -> str:
 _TRAILING_META = re.compile(r"\s*(·.*|listed .*|sponsored.*)$", re.IGNORECASE)
 
 
+def _parse_listed(text_lines: list[str]) -> str:
+    """Return the card's "listed" badge as normalised wording, or "".
+
+    Facebook words this as "Just listed", "Listed 5 minutes ago", "Listed
+    yesterday" and so on. "Just listed" and "Just now" collapse to "just now"
+    so downstream code has one spelling to reason about.
+    """
+    for line in text_lines:
+        match = _LISTED_BADGE.match(line.strip())
+        if match:
+            raw = match.group(1).lower().strip()
+            return "just now" if raw in ("just listed", "just now") else raw
+    return ""
+
+
 def _parse_location(text_lines: list[str]) -> str:
     """Find the location, which sits after the price on its own or same line.
 
     Handles both shapes Facebook uses: separate spans ("£280", "Croydon") and
     one span ("£280Croydon, London" / "£280 Croydon, London").
+
+    A card reads badge, price, title, location — so the location is the *last*
+    usable line. Taking the first line after the price returns the title, which
+    is what made every listing appear to be located in its own name.
     """
     for index, line in enumerate(text_lines):
         price_match = _PRICE.search(line)
@@ -120,15 +162,31 @@ def _parse_location(text_lines: list[str]) -> str:
         if tail and not _NON_PRICE_LINE.match(tail):
             return _TRAILING_META.sub("", tail).strip()
 
-        for following in text_lines[index + 1 :]:
+        for following in reversed(text_lines[index + 1 :]):
             candidate = following.strip()
-            if (
-                candidate
-                and not _PRICE.search(candidate)
-                and not _NON_PRICE_LINE.match(candidate)
-            ):
-                return _TRAILING_META.sub("", candidate).strip()
+            if not candidate:
+                continue
+            if _PRICE.search(candidate) or _NON_PRICE_LINE.match(candidate):
+                continue
+            cleaned = _TRAILING_META.sub("", candidate).strip()
+            if cleaned:
+                return cleaned
     return ""
+
+
+def _strip_location_suffix(title: str, location: str) -> str:
+    """Drop the " in <location>" tail Facebook appends to the image alt text.
+
+    The alt reads "iPhone 16 Pro in Brighton and Hove" while the card's own
+    title line is just "iPhone 16 Pro"; keeping the tail duplicates the Area
+    column and makes the title harder to scan.
+    """
+    if not location:
+        return title
+    suffix = f" in {location}"
+    if title.lower().endswith(suffix.lower()):
+        return title[: -len(suffix)].strip()
+    return title
 
 
 async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
@@ -176,16 +234,43 @@ async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
             unparsed += 1
             continue
 
+        location = _parse_location(lines)
         listings.append(
             Listing.from_card(
                 item_id=item_id,
-                title=title,
+                title=_strip_location_suffix(title, location),
                 price=price,
-                location=_parse_location(lines),
+                location=location,
+                listed_text=_parse_listed(lines),
             )
         )
 
     return listings, unparsed
+
+
+async def fetch_listed_age(session: BrowserSession, url: str) -> str:
+    """Read a listing's real "Listed X ago" wording from its detail page.
+
+    The search card badges everything "Just listed", so the card alone cannot
+    tell you how old a listing is. Only worth doing for listings we are about
+    to alert on — it costs one extra page load.
+    """
+    page = await session.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(2500)
+        text = await page.inner_text("body")
+    except Exception as exc:  # noqa: BLE001 - a missing age must not block the alert
+        log.warning("Could not read listed age for %s: %s", url, exc)
+        return ""
+    finally:
+        await page.close()
+
+    match = _LISTED_DETAIL.search(text)
+    if not match:
+        return ""
+    raw = match.group(1).lower().strip()
+    return "just now" if raw in ("just listed", "just now") else raw
 
 
 async def dump_debug(page: Page, debug_dir: str, reason: str) -> Path:

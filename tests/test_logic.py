@@ -57,6 +57,14 @@ def test_url_contains_all_filters():
     assert qs["sortBy"] == ["creation_time_descend"]
     assert qs["radiusKM"] == ["25"]
     assert qs["lat"] == ["51.5074"]
+    # Without this Facebook ignores the sort and serves ~15-hour-old listings.
+    assert qs["daysSinceListed"] == ["1"]
+
+
+def test_url_omits_recency_window_when_disabled():
+    spec = SearchSpec("london", "iphone", None, None, 25, 0.0, 0.0, days_since_listed=None)
+    qs = parse_qs(urlparse(spec.build_url()).query)
+    assert "daysSinceListed" not in qs
 
 
 def test_url_override_wins():
@@ -167,7 +175,41 @@ def test_location_missing_returns_empty():
     assert _parse_location(["£280"]) == ""
 
 
+def test_location_is_last_line_not_the_title():
+    # Real card order: badge, price, title, location. Taking the first line
+    # after the price returned the title, so every listing looked located in
+    # its own name.
+    lines = [
+        "Just listed",
+        "£530",
+        "iPhone 16 Pro Max - Excellent Condition",
+        "Erith, Greenwich, United Kingdom",
+    ]
+    assert _parse_location(lines) == "Erith, Greenwich, United Kingdom"
+
+
+def test_title_drops_redundant_location_suffix():
+    from watcher.marketplace import _strip_location_suffix
+
+    assert (
+        _strip_location_suffix("iPhone 16 Pro in Brighton and Hove", "Brighton and Hove")
+        == "iPhone 16 Pro"
+    )
+    assert _strip_location_suffix("iPhone 13", "London") == "iPhone 13"
+
+
 # -------------------------------------------------------------------- store
+
+
+def test_quoted_false_disables_a_channel():
+    # bool("false") is True, which would silently enable a disabled channel.
+    from watcher.config import _as_bool
+
+    assert _as_bool("false", True) is False
+    assert _as_bool("no", True) is False
+    assert _as_bool("true", False) is True
+    assert _as_bool(None, True) is True
+    assert _as_bool(False, True) is False
 
 
 def test_store_claim_is_idempotent():

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .models import AppConfig
 from .runner import WatcherRunner
@@ -61,7 +61,6 @@ def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True)
     @api.get("/api/status")
     async def status() -> dict:
         s = runner.status.as_dict()
-        s["result"] = None
         with Store(cfg.db_path) as store:
             s["stats"] = store.stats()
         return s
@@ -73,22 +72,18 @@ def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True)
         max_price: int | None = None,
         min_price: int | None = None,
         q: str = "",
+        since_hours: float | None = Query(None, ge=0),
     ) -> dict:
         with Store(cfg.db_path) as store:
-            rows = store.recent_listings(limit=500, only_new=only_new)
-        needle = q.strip().lower()
-        out = []
-        for row in rows:
-            if max_price is not None and (row["price"] is None or row["price"] > max_price):
-                continue
-            if min_price is not None and (row["price"] is None or row["price"] < min_price):
-                continue
-            if needle and needle not in (row["title"] or "").lower() and needle not in (
-                row["location"] or ""
-            ).lower():
-                continue
-            out.append(row)
-        return {"items": out[:limit], "total": len(out)}
+            rows, total = store.search_listings(
+                limit=limit,
+                only_new=only_new,
+                min_price=min_price,
+                max_price=max_price,
+                q=q,
+                since_hours=since_hours,
+            )
+        return {"items": rows, "total": total}
 
     @api.get("/api/polls")
     async def polls(limit: int = Query(40, ge=1, le=200)) -> dict:
@@ -104,6 +99,7 @@ def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True)
             "radius_km": s.radius_km,
             "min_price": s.min_price,
             "max_price": s.max_price,
+            "days_since_listed": s.days_since_listed,
             "interval_seconds": cfg.interval_seconds,
             "jitter_seconds": cfg.jitter_seconds,
             "max_cards": cfg.max_cards,
@@ -139,22 +135,39 @@ def create_app(cfg: AppConfig, runner: WatcherRunner, *, autostart: bool = True)
         return {"ok": True}
 
     @api.get("/api/export.csv")
-    async def export_csv() -> JSONResponse:
+    async def export_csv() -> Response:
         import csv
         import io
 
         with Store(cfg.db_path) as store:
-            rows = store.recent_listings(limit=5000, only_new=True)
+            rows, _ = store.search_listings(limit=5000, only_new=True)
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["id", "title", "price", "location", "url", "first_seen"])
+        writer.writerow(
+            ["id", "title", "price", "location", "url", "listed_text", "listed_at", "first_seen"]
+        )
         for row in rows:
             writer.writerow(
-                [row["id"], row["title"], row["price"], row["location"], row["url"], row["first_seen"]]
+                [
+                    row["id"],
+                    row["title"],
+                    row["price"],
+                    row["location"],
+                    row["url"],
+                    row["listed_text"],
+                    row["listed_at"],
+                    row["first_seen"],
+                ]
             )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-        return JSONResponse(
-            {"csv": buffer.getvalue(), "filename": f"iphone-listings-{stamp}.csv"}
+        # A real file download, not a JSON envelope: the browser saves it
+        # directly, which is what an "Export CSV" button has to do.
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="iphone-listings-{stamp}.csv"'
+            },
         )
 
     return api

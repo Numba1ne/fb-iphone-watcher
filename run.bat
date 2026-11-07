@@ -12,7 +12,7 @@ if exist ".venv\Scripts\python.exe" (
 
 :loop
 echo [%date% %time%] starting watcher
-%PY% main.py
+%PY% main.py %*
 echo [%date% %time%] watcher exited with code %errorlevel%
 echo Restarting in 30 seconds... (Ctrl+C to stop)
 timeout /t 30 /nobreak >nul

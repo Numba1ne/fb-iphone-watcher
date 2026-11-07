@@ -201,6 +201,17 @@ td.when { color: var(--faint); font-size: 12px; white-space: nowrap; font-varian
   text-transform: uppercase; padding: 2px 6px; border-radius: 5px;
   background: var(--accent-bg); color: var(--accent-ink); margin-left: 6px; vertical-align: 1px;
 }
+/* Backlog = already listed before we started watching. Deliberately quiet so
+   it never reads as a fresh find. */
+.tag.backlog { background: var(--surface-2); color: var(--muted); }
+
+/* When the API stops answering, the last data stays on screen. Dim it and say
+   so, rather than showing frozen numbers as if they were live.
+   One rule: #banner-offline carries [hidden] unless body.stale, matching how
+   the session banner works. A bare `.banner-offline { display: none }` would
+   lose to `.banner { display: flex }` on specificity and show while online. */
+body:not(.stale) #banner-offline { display: none; }
+body.stale .strip, body.stale .grid { opacity: .5; filter: saturate(.6); }
 .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
 .empty strong { display: block; color: var(--ink); font-weight: 600; margin-bottom: 4px; }
 
@@ -256,6 +267,7 @@ hr.sep { border: 0; border-top: 1px solid var(--line-soft); margin: 0; }
       <button id="btn-start" class="primary" type="button">Start</button>
       <button id="btn-stop" class="danger" type="button">Stop</button>
       <button id="btn-poll" type="button">Poll now</button>
+      <button id="btn-export" type="button">Export CSV</button>
     </div>
   </header>
 
@@ -263,6 +275,13 @@ hr.sep { border: 0; border-top: 1px solid var(--line-soft); margin: 0; }
     <span>
       <strong>Facebook session expired.</strong>
       Run <code>python main.py --login</code> in a terminal, then press Start again.
+    </span>
+  </div>
+
+  <div id="banner-offline" class="banner warn" hidden>
+    <span>
+      <strong>Dashboard offline.</strong>
+      The numbers below are the last ones received and may be out of date. Retrying…
     </span>
   </div>
 
@@ -306,12 +325,19 @@ hr.sep { border: 0; border-top: 1px solid var(--line-soft); margin: 0; }
             <option value="all" selected>All seen</option>
             <option value="new">Alerted only</option>
           </select>
+          <select id="fresh" aria-label="How recent">
+            <option value="1">Last hour</option>
+            <option value="2" selected>Last 2h</option>
+            <option value="6">Last 6h</option>
+            <option value="24">Last 24h</option>
+            <option value="">Any age</option>
+          </select>
         </div>
       </div>
       <div class="scroll">
         <table>
           <thead>
-            <tr><th>Price</th><th>Listing</th><th>Area</th><th>Found</th></tr>
+            <tr><th>Price</th><th>Listing</th><th>Area</th><th>Listed</th><th>First seen</th></tr>
           </thead>
           <tbody id="rows"></tbody>
         </table>
@@ -414,23 +440,40 @@ function renderStatus(s) {
 }
 
 async function loadListings() {
+  try {
+    await loadListingsInner();
+  } catch (e) {
+    setStale(true);
+  }
+}
+
+async function loadListingsInner() {
   const scope = $("scope").value;
   const q = $("q").value;
   const maxp = $("maxp").value;
+  const fresh = $("fresh").value;
   const params = new URLSearchParams({ only_new: scope === "new" ? "true" : "false", limit: "300" });
   if (q) params.set("q", q);
   if (maxp) params.set("max_price", maxp);
+  // Empty value = "Any age", so the parameter is simply omitted.
+  if (fresh) params.set("since_hours", fresh);
   const data = await api("/api/listings?" + params);
 
   const body = $("rows");
   body.innerHTML = "";
   for (const it of data.items) {
     const tr = document.createElement("tr");
-    const isNew = it.notified === 1;
+    // notified=1 means we alerted on it. notified=0 means it was already
+    // there when we started, recorded silently — it is not a fresh find, and
+    // labelling it "alerted" would misrepresent an old listing as new.
+    const alerted = it.notified === 1;
     tr.innerHTML = `
       <td class="price">${money(it.price)}</td>
-      <td class="title"><a href="${it.url}" target="_blank" rel="noopener noreferrer"></a>${isNew ? '<span class="tag">alerted</span>' : ""}</td>
+      <td class="title"><a href="${it.url}" target="_blank" rel="noopener noreferrer"></a>${
+        alerted ? '<span class="tag">alerted</span>' : '<span class="tag backlog">backlog</span>'
+      }</td>
       <td class="loc"></td>
+      <td class="when" title="${it.listed_at || ""}">${it.listed_text || "—"}</td>
       <td class="when" title="${it.first_seen}">${ago(it.first_seen)}</td>`;
     tr.querySelector("a").textContent = it.title;
     tr.querySelector(".loc").textContent = it.location || "—";
@@ -448,12 +491,22 @@ async function loadListings() {
   } else {
     $("empty").querySelector("strong").textContent = "No listings yet";
     $("empty-hint").textContent = S.status && S.status.state === "running"
-      ? "Nothing matches these filters yet. New matches appear here as they arrive."
+      ? (fresh
+          ? "Nothing seen in this time window. Widen “How recent” to see older listings."
+          : "Nothing matches these filters yet. New matches appear here as they arrive.")
       : "Press Start to begin watching.";
   }
 }
 
 async function loadPolls() {
+  try {
+    await loadPollsInner();
+  } catch (e) {
+    setStale(true);
+  }
+}
+
+async function loadPollsInner() {
   const data = await api("/api/polls?limit=40");
   const bars = $("bars");
   bars.innerHTML = "";
@@ -482,6 +535,9 @@ function renderSettings(st) {
     ["Query", st.query],
     ["Area", st.city_slug + " · " + st.radius_km + " km"],
     ["Price band", money(st.min_price) + " – " + money(st.max_price)],
+    ["Listed within", st.days_since_listed
+      ? st.days_since_listed + (st.days_since_listed === 1 ? " day" : " days")
+      : "any time"],
     ["Interval", st.interval_seconds + "s ± " + st.jitter_seconds + "s"],
     ["Channels", [st.telegram && "Telegram", st.discord && "Discord"].filter(Boolean).join(" + ") || "none"],
     ["Window", st.headless ? "headless" : "visible"],
@@ -494,13 +550,22 @@ function renderSettings(st) {
   $("search-sub").textContent = `${st.query} · ${st.city_slug} · ${money(st.min_price)}–${money(st.max_price)}`;
 }
 
+function setStale(on) {
+  document.body.classList.toggle("stale", on);
+  // The global [hidden] rule is !important, so the attribute must be removed
+  // too — the class alone cannot reveal the banner.
+  $("banner-offline").hidden = !on;
+}
+
 async function refresh() {
   try {
     const s = await api("/api/status");
+    setStale(false);
     const before = S.status ? S.status.stats.total : null;
     renderStatus(s);
     if (before !== null && s.stats.total !== before) loadListings();
   } catch (e) {
+    setStale(true);
     const pill = $("state-pill");
     pill.className = "pill failed";
     pill.textContent = "Dashboard offline";
@@ -509,7 +574,9 @@ async function refresh() {
 }
 
 async function act(btn, path, okMsg) {
-  const buttons = [...document.querySelectorAll("button")];
+  // Only the control buttons: disabling Export would leave it dead, since
+  // refresh() only restores the three it knows about.
+  const buttons = ["btn-start", "btn-stop", "btn-poll"].map($);
   buttons.forEach((b) => (b.disabled = true));
   try {
     const r = await api(path, { method: "POST" });
@@ -527,7 +594,9 @@ async function act(btn, path, okMsg) {
 $("btn-start").onclick = () => act($("btn-start"), "/api/start", () => "Watcher started");
 $("btn-stop").onclick = () => act($("btn-stop"), "/api/stop", () => "Watcher stopped");
 $("btn-poll").onclick = () => act($("btn-poll"), "/api/poll-now", () => "Polling now");
+$("btn-export").onclick = () => { window.location.href = "/api/export.csv"; };
 $("scope").onchange = loadListings;
+$("fresh").onchange = loadListings;
 $("maxp").oninput = () => { clearTimeout(S.timer); S.timer = setTimeout(loadListings, 220); };
 $("q").oninput = () => { clearTimeout(S.timer); S.timer = setTimeout(loadListings, 220); };
 

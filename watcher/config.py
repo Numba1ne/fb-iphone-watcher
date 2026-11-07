@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ import yaml
 from dotenv import load_dotenv
 
 from .models import AppConfig, SearchSpec
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -21,6 +24,21 @@ class ConfigError(Exception):
 def _get(section: dict[str, Any], key: str, default: Any) -> Any:
     value = section.get(key, default)
     return default if value is None else value
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    """Parse a YAML boolean without `bool()`'s trap.
+
+    `bool("false")` is True, so a quoted `telegram: "false"` would silently
+    enable a channel the user turned off.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _as_int(value: Any, label: str) -> int | None:
@@ -73,24 +91,33 @@ def load(config_path: str | Path | None = None) -> AppConfig:
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-    want_telegram = bool(_get(notifications, "telegram", True))
-    want_discord = bool(_get(notifications, "discord", True))
+    want_telegram = _as_bool(notifications.get("telegram"), True)
+    want_discord = _as_bool(notifications.get("discord"), True)
 
-    if want_telegram and not (telegram_token and telegram_chat_id):
+    telegram_ready = bool(telegram_token and telegram_chat_id)
+    discord_ready = bool(discord_url)
+
+    # A channel that is switched on but has no credentials is a wiring mistake
+    # worth stopping for — it would silently never deliver. A channel that is
+    # switched *on* with credentials, or a run with both switched off, is fine:
+    # both are useful for checking that scraping and the dashboard work before
+    # the alerting is wired up. Deliveries are logged when they have nowhere
+    # to go, so silence is never mysterious.
+    if want_telegram and not telegram_ready:
         raise ConfigError(
             "notifications.telegram is enabled but TELEGRAM_BOT_TOKEN / "
             "TELEGRAM_CHAT_ID are missing from .env.\n"
             "Either fill them in, or set notifications.telegram: false."
         )
-    if want_discord and not discord_url:
+    if want_discord and not discord_ready:
         raise ConfigError(
             "notifications.discord is enabled but DISCORD_WEBHOOK_URL is missing "
             "from .env.\nEither fill it in, or set notifications.discord: false."
         )
     if not want_telegram and not want_discord:
-        raise ConfigError(
-            "Both notification channels are disabled — you would never be told "
-            "about a listing. Enable at least one."
+        log.warning(
+            "No notification channel is enabled — listings will be recorded and "
+            "shown on the dashboard, but nothing will be sent."
         )
 
     spec = SearchSpec(
@@ -101,6 +128,9 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         radius_km=int(_get(search, "radius_km", 25)),
         latitude=float(_get(search, "latitude", 51.5074)),
         longitude=float(_get(search, "longitude", -0.1278)),
+        days_since_listed=_as_int(
+            search.get("days_since_listed", 1), "search.days_since_listed"
+        ),
         override_url=str(_get(search, "search_url_override", "")).strip(),
     )
 
@@ -116,18 +146,22 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         jitter_seconds=float(_get(polling, "jitter_seconds", 8)),
         max_cards=int(_get(polling, "max_cards", 30)),
         restart_browser_every=int(_get(polling, "restart_browser_every", 100)),
-        headless=bool(_get(browser, "headless", True)),
+        headless=_as_bool(browser.get("headless"), True),
         user_data_dir=resolve(str(_get(browser, "user_data_dir", "data/browser-profile"))),
         navigation_timeout_ms=int(_get(browser, "navigation_timeout_ms", 30000)),
         require_any=tuple(filters.get("require_any") or ()),
         exclude=tuple(filters.get("exclude") or ()),
         telegram=want_telegram,
         discord=want_discord,
-        first_run_silent=bool(_get(notifications, "first_run_silent", True)),
+        first_run_silent=_as_bool(notifications.get("first_run_silent"), True),
         db_path=resolve(str(_get(paths, "db", "data/bot.db"))),
         log_path=resolve(str(_get(paths, "log", "data/logs/bot.log"))),
         debug_dir=resolve(str(_get(paths, "debug", "data/debug"))),
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,
         discord_webhook_url=discord_url,
+        notifications_probe=_as_bool(notifications.get("probe"), False),
+        notifications_probe_every=max(
+            1, int(_get(notifications, "probe_every", 4))
+        ),
     )

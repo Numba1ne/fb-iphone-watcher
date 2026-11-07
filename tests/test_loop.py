@@ -46,7 +46,25 @@ class FakePage:
         return None
 
 
+class FakePage:
+    """Stands in for a detail page; reports no listed age."""
+
+    async def goto(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def wait_for_timeout(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def inner_text(self, *args: object, **kwargs: object) -> str:
+        return ""
+
+    async def close(self) -> None:
+        return None
+
+
 class FakeSession:
+    restarts = 0
+
     async def start(self) -> None:
         return None
 
@@ -54,7 +72,10 @@ class FakeSession:
         return None
 
     async def restart(self) -> None:
-        return None
+        FakeSession.restarts += 1
+
+    async def new_page(self) -> FakePage:
+        return FakePage()
 
 
 def make_cfg(tmp: Path, **overrides: object):
@@ -200,6 +221,24 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         runner = WatcherRunner(make_cfg(Path(tmpdir)))
         check("stop() on a stopped runner returns False", await runner.stop() is False)
+
+    # 7. restart_browser_every actually restarts the browser on schedule.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), restart_browser_every=1)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        FakeSession.restarts = 0
+        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+        with p1, p2, p3, p4:
+            await runner.start()
+            await _wait_for_polls(runner, 1)
+            runner.trigger_poll()  # skip the interval so the test stays fast
+            await _wait_for_polls(runner, 2)
+            await runner.stop()
+        check(
+            f"browser restarted on schedule (restarts={FakeSession.restarts})",
+            FakeSession.restarts >= 1,
+        )
 
     print()
     if failures:

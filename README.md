@@ -1,8 +1,9 @@
 # Facebook Marketplace iPhone Watcher
 
-Polls Facebook Marketplace every ~45 seconds, and sends you a Telegram and/or
-Discord alert the moment a new matching iPhone listing appears. Remembers what
-it has already seen, so you are never told about the same listing twice.
+Polls Facebook Marketplace every ~30 seconds, and sends you a Telegram and/or
+Discord alert the moment a new matching iPhone listing appears — typically
+within a minute of it being posted. Remembers what it has already seen, so you
+are never told about the same listing twice.
 
 ---
 
@@ -167,9 +168,10 @@ nothing outside this machine can connect.
 | `search.radius_km` | `25` | Search radius |
 | `search.latitude` / `longitude` | London | Centre of the radius |
 | `search.min_price` / `max_price` | `100` / `1200` | Price band in £, either can be `""` for open |
+| `search.days_since_listed` | `1` | Recency window in days; `0` removes it |
 | `search.search_url_override` | `""` | Paste a full Marketplace URL to override everything |
-| `polling.interval_seconds` | `45` | Minimum 15 |
-| `polling.jitter_seconds` | `8` | Random ± on the interval |
+| `polling.interval_seconds` | `30` | Minimum 15 |
+| `polling.jitter_seconds` | `5` | Random ± on the interval |
 | `filters.require_any` | `["iphone"]` | Title must contain one |
 | `filters.exclude` | parts/cracked/locked… | Title containing any is dropped |
 | `notifications.first_run_silent` | `true` | Record existing listings without alerting |
@@ -181,6 +183,13 @@ latitude. For example, Birmingham is `51.4545, -1.8798`.
 
 **Narrowing the price band:** £100–£1200 is deliberately wide. To focus on
 genuine bargains, set `max_price: 350`.
+
+**Why `days_since_listed` matters:** it is not just a filter. Facebook ignores
+`sortBy=creation_time_descend` unless a recency window is present, and without
+one the feed returns listings around 15 hours old while still badging them
+"Just listed". With `days_since_listed: 1` the same search returns listings
+minutes old. Setting it to `0` removes the window and brings the stale feed
+back, so leave it at `1` unless you have a reason.
 
 ---
 

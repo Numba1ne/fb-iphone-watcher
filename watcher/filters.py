@@ -24,6 +24,17 @@ def _compile_exclusions(terms: tuple[str, ...]) -> list[re.Pattern[str]]:
 
 def matches(listing: Listing, *, require_any: tuple[str, ...], exclude: tuple[str, ...]) -> bool:
     """True when a listing should trigger a notification."""
+    return _matches(listing, require_any=require_any, patterns=_compile_exclusions(exclude))
+
+
+def _matches(
+    listing: Listing, *, require_any: tuple[str, ...], patterns: list[re.Pattern[str]]
+) -> bool:
+    """The filter itself, taking precompiled exclusion patterns.
+
+    Split out so `apply` compiles the exclusion list once per batch instead of
+    once per listing.
+    """
     title = listing.title.lower()
 
     if require_any and not any(term.lower() in title for term in require_any):
@@ -33,7 +44,7 @@ def matches(listing: Listing, *, require_any: tuple[str, ...], exclude: tuple[st
         # Free or nonsensical prices are usually mis-typed or bait.
         return False
 
-    return not any(pattern.search(title) for pattern in _compile_exclusions(exclude))
+    return not any(pattern.search(title) for pattern in patterns)
 
 
 def apply(
@@ -49,9 +60,10 @@ def apply(
     Facebook treats `maxPrice`/`minPrice` as real filters, but we re-check
     locally so a silently-ignored URL parameter can't flood the alerts.
     """
+    patterns = _compile_exclusions(exclude)
     result = []
     for listing in listings:
-        if not matches(listing, require_any=require_any, exclude=exclude):
+        if not _matches(listing, require_any=require_any, patterns=patterns):
             continue
         if listing.price is None:
             # Keep unpriced listings only if the band is open; a listing with

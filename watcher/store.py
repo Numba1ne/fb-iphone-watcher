@@ -12,13 +12,17 @@ log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
-    id         TEXT PRIMARY KEY,
-    title      TEXT NOT NULL,
-    price      INTEGER,
-    location   TEXT,
-    url        TEXT NOT NULL,
-    first_seen TEXT NOT NULL,
-    notified   INTEGER NOT NULL DEFAULT 0
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    price       INTEGER,
+    location    TEXT,
+    url         TEXT NOT NULL,
+    first_seen  TEXT NOT NULL,
+    notified    INTEGER NOT NULL DEFAULT 0,
+    -- Facebook's own wording ("2 hours ago") plus the absolute moment it
+    -- implies, estimated when we scraped the card.
+    listed_text TEXT,
+    listed_at   TEXT
 );
 
 -- One row per scrape. The dashboard reads these to answer "is it working?"
@@ -45,7 +49,19 @@ class Store:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so a
+        long-running install would otherwise never gain the new columns.
+        """
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(listings)")}
+        for column in ("listed_text", "listed_at"):
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE listings ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         self._conn.close()
@@ -72,8 +88,8 @@ class Store:
         """
         cursor = self._conn.execute(
             "INSERT OR IGNORE INTO listings "
-            "(id, title, price, location, url, first_seen, notified) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(id, title, price, location, url, first_seen, notified, listed_text, listed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 listing.id,
                 listing.title,
@@ -82,10 +98,20 @@ class Store:
                 listing.url,
                 now,
                 int(alert),
+                listing.listed_text or None,
+                listing.listed_at,
             ),
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def update_listed(self, listing_id: str, listed_text: str, listed_at: str | None) -> None:
+        """Correct a row's listed time once the detail page has been read."""
+        self._conn.execute(
+            "UPDATE listings SET listed_text = ?, listed_at = ? WHERE id = ?",
+            (listed_text, listed_at, listing_id),
+        )
+        self._conn.commit()
 
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
@@ -100,20 +126,73 @@ class Store:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (started_at, finished_at, parsed, new, int(ok), error or None),
         )
+        # datetime() normalises both sides: started_at is ISO-8601 with a "T"
+        # and a +00:00 offset, which does not compare correctly as a string
+        # against SQLite's "YYYY-MM-DD HH:MM:SS" output.
         self._conn.execute(
-            "DELETE FROM polls WHERE started_at < datetime('now', ?)",
+            "DELETE FROM polls WHERE datetime(started_at) < datetime('now', ?)",
             (f"-{POLL_RETENTION_DAYS} days",),
         )
         self._conn.commit()
 
-    def recent_listings(self, limit: int = 200, *, only_new: bool = False) -> list[dict]:
-        where = "WHERE notified = 1" if only_new else ""
+    def search_listings(
+        self,
+        *,
+        limit: int = 200,
+        only_new: bool = False,
+        min_price: int | None = None,
+        max_price: int | None = None,
+        q: str = "",
+        since_hours: float | None = None,
+    ) -> tuple[list[dict], int]:
+        """Return (page of listings, total matching the filters).
+
+        Filtering happens in SQL so `total` counts every match rather than
+        only the rows that happened to fit in the page.
+
+        `since_hours` keeps only listings first seen within that window. The
+        first run records the whole existing backlog silently, and without a
+        window those old listings sit at the bottom of the dashboard forever,
+        making a working watcher look like it is stuck on stale results.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if only_new:
+            clauses.append("notified = 1")
+        if since_hours is not None:
+            clauses.append("datetime(first_seen) >= datetime('now', ?)")
+            params.append(f"-{since_hours} hours")
+        if min_price is not None:
+            clauses.append("price IS NOT NULL AND price >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            clauses.append("price IS NOT NULL AND price <= ?")
+            params.append(max_price)
+
+        needle = q.strip().lower()
+        if needle:
+            # Escape LIKE's own wildcards so a search for "50%" means "50%".
+            escaped = (
+                needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            clauses.append(
+                "(LOWER(title) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(location, '')) LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM listings {where}", params
+        ).fetchone()[0]
         rows = self._conn.execute(
-            f"SELECT id, title, price, location, url, first_seen, notified "
+            f"SELECT id, title, price, location, url, first_seen, notified, "
+            f"listed_text, listed_at "
             f"FROM listings {where} ORDER BY rowid DESC LIMIT ?",
-            (limit,),
+            [*params, limit],
         )
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows], total
 
     def recent_polls(self, limit: int = 40) -> list[dict]:
         rows = self._conn.execute(

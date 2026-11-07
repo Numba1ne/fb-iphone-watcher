@@ -32,7 +32,7 @@ def _handle_stop(signum: int, frame: object) -> None:
     _SHUTDOWN = True
 
 
-async def run_terminal(cfg: AppConfig, *, once: bool = False, debug: bool = False) -> int:
+async def run_terminal(cfg: AppConfig, *, once: bool = False) -> int:
     """No-dashboard mode: run the loop until Ctrl+C or the session expires."""
     runner = WatcherRunner(cfg)
     await runner.start()
@@ -201,7 +201,7 @@ def main() -> int:
     try:
         if args.dashboard:
             return asyncio.run(run_dashboard(cfg, port=args.port))
-        return asyncio.run(run_terminal(cfg, once=args.once, debug=args.debug))
+        return asyncio.run(run_terminal(cfg, once=args.once))
     except KeyboardInterrupt:
         log.info("Interrupted")
         return 0

@@ -1,0 +1,40 @@
+# Verification-only config: both notification channels off, so the watcher can
+# be started end-to-end without any real credentials. Not for day-to-day use.
+
+search:
+  query: "iphone"
+  city_slug: "london"
+  radius_km: 25
+  latitude: 51.5074
+  longitude: -0.1278
+  min_price: 100
+  max_price: 1200
+  days_since_listed: 1
+  search_url_override: ""
+
+polling:
+  interval_seconds: 30
+  jitter_seconds: 5
+  max_cards: 30
+  restart_browser_every: 100
+
+browser:
+  headless: true
+  user_data_dir: "data/browser-profile"
+  navigation_timeout_ms: 30000
+
+filters:
+  require_any:
+    - "iphone"
+  exclude:
+    - "for parts"
+
+notifications:
+  telegram: false
+  discord: false
+  first_run_silent: true
+
+paths:
+  db: "data/verify.db"
+  log: "data/logs/verify.log"
+  debug: "data/debug"

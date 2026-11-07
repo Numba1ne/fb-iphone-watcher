@@ -9,14 +9,21 @@ search:
   longitude: -0.1278
   min_price: 100
   max_price: 1200
+  # Only listings posted in the last N days. This is not just a filter: Facebook
+  # ignores sortBy=creation_time_descend without it and returns listings ~15
+  # hours old, badged "Just listed". 1 keeps the feed genuinely newest-first.
+  # Set to 0 to remove the window (and lose the newest-first ordering).
+  days_since_listed: 1
   # Escape hatch: open Marketplace in your browser, configure the search you
   # want, copy the whole URL, and paste it here. It then overrides everything
   # above. Useful if Facebook renames a URL parameter.
   search_url_override: ""
 
 polling:
-  interval_seconds: 45       # minimum 15 — anything faster risks a Facebook block
-  jitter_seconds: 8          # random +/- seconds so polling isn't metronomic
+  # 30s + up to 5s jitter, plus a few seconds of page load, keeps detection
+  # under a minute. Minimum 15 — anything faster risks a Facebook block.
+  interval_seconds: 30
+  jitter_seconds: 5          # random +/- seconds so polling isn't metronomic
   max_cards: 30              # newest-first, so the top of the page is enough
   restart_browser_every: 100 # polls between browser restarts, to free memory
 
@@ -52,6 +59,12 @@ notifications:
   discord: true
   # On the very first run, record existing listings without alerting on them.
   first_run_silent: true
+  # Measurement, not alerting. Every `probe_every` polls, read the Facebook
+  # notifications page and record the first moment each listing appears in a
+  # saved-search alert. `python tools/notify_race.py` then compares that
+  # against the poll. Costs one extra page load per probe; set false to stop.
+  probe: false
+  probe_every: 4
 
 paths:
   db: "data/bot.db"

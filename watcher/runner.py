@@ -11,13 +11,15 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import filters
 from .browser import BrowserSession, SessionExpired
-from .marketplace import dump_debug, open_search, parse_cards
+from .marketplace import dump_debug, fetch_listed_age, open_search, parse_cards
 from .models import AppConfig, Listing
+from .notifications import NotificationLog, fetch_alert_items
 from .notify import Notifier
 from .store import Store
 
@@ -38,7 +40,6 @@ class Status:
     consecutive_failures: int = 0
     next_poll_in: float | None = None
     session_expired: bool = False
-    recent_new: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -54,7 +55,6 @@ class Status:
                 else None
             ),
             "session_expired": self.session_expired,
-            "recent_new": self.recent_new[-5:],
         }
 
 
@@ -67,6 +67,7 @@ class WatcherRunner:
         self._poll_now = False
         self._session: BrowserSession | None = None
         self.last_result: tuple[int, int] = (0, 0)  # (parsed, alerted) from the last attempt
+        self._notif_log: NotificationLog | None = None
 
     # -------------------------------------------------------------- control
 
@@ -107,8 +108,9 @@ class WatcherRunner:
     async def poll_once(self) -> None:
         """Run exactly one poll on the caller's event loop.
 
-        Used by --once, where a background task with its own scheduling would
-        make "poll once, then exit" depend on timing.
+        Used by the tests and by any caller that wants a single deterministic
+        poll, where a background task with its own scheduling would make the
+        result depend on timing.
         """
         # Only reset on the first call: repeated poll_once calls should
         # accumulate the count, not start from zero each time.
@@ -168,11 +170,13 @@ class WatcherRunner:
 
         self.status.state = "running"
         failures = 0
+        polls_since_restart = 0
 
         try:
             while not self._stop_requested:
                 wait = cfg.interval_seconds
                 started = _utc_now()
+                cycle_start = time.monotonic()
                 try:
                     await self._poll()
                     self._record_poll(started, ok=True)
@@ -202,12 +206,45 @@ class WatcherRunner:
                 # count matches wall-clock intervals rather than only good polls.
                 self.status.poll_count += 1
 
+                # Measurement, not alerting: record when each listing first
+                # shows up in a saved-search notification, so the push can be
+                # compared against the poll. Every N polls, since it costs an
+                # extra page load and Facebook notices a session that asks too
+                # often.
+                if (
+                    cfg.notifications_probe
+                    and self._session is not None
+                    and self.status.poll_count % cfg.notifications_probe_every == 0
+                ):
+                    await self._probe_notifications()
+
                 if failures >= 5 and self._session is not None:
                     log.error("5 consecutive failures — restarting browser")
                     await self._session.restart()
                     failures = 0
+                    polls_since_restart = 0
 
-                await self._wait(wait)
+                # Periodic restart to reclaim memory, as configured. A failed
+                # restart is not fatal: the next poll fails, and the 5-failure
+                # path above tries again.
+                polls_since_restart += 1
+                if (
+                    cfg.restart_browser_every > 0
+                    and polls_since_restart >= cfg.restart_browser_every
+                    and self._session is not None
+                ):
+                    log.info("Restarting browser after %d polls", polls_since_restart)
+                    try:
+                        await self._session.restart()
+                    except Exception:  # noqa: BLE001 - surfaced by the next poll
+                        log.exception("Browser restart failed")
+                    polls_since_restart = 0
+
+                # Schedule the next poll `interval` after this one *started*, so
+                # a slow page load doesn't stretch the cadence. Waiting the full
+                # interval after each poll made a 30s setting behave like ~42s.
+                elapsed = time.monotonic() - cycle_start
+                await self._wait(max(0.0, wait - elapsed))
         finally:
             if self._session is not None:
                 await self._session.stop()
@@ -216,6 +253,36 @@ class WatcherRunner:
                 self.status.state = "stopped"
             self.status.next_poll_in = None
             log.info("Watcher loop stopped")
+
+    async def _probe_notifications(self) -> None:
+        """Record any listing ids newly visible in the notifications page.
+
+        Never raises: this is a measurement riding along with the poll, and a
+        failed probe must not be mistaken for a failed poll.
+        """
+        assert self._session is not None
+        if self._notif_log is None:
+            self._notif_log = NotificationLog(
+                str(Path(self.cfg.db_path).parent / "notif-log.jsonl")
+            )
+        try:
+            items = await fetch_alert_items(self._session)
+            fresh = self._notif_log.record(items)
+        except Exception:  # noqa: BLE001 - instrumentation must not break the loop
+            log.exception("Notification probe failed")
+            return
+        if fresh:
+            log.info(
+                "Notification probe: %d new listing(s) in notifications: %s",
+                len(fresh),
+                ", ".join(item["id"] for item in fresh),
+            )
+        else:
+            # Logged even when empty: without this, a probe that runs and finds
+            # nothing is indistinguishable from one that never ran.
+            log.debug(
+                "Notification probe: %d listing(s) visible, none new", len(items)
+            )
 
     async def _wait(self, seconds: float) -> None:
         """Sleep, honouring stop and 'poll now', while publishing the countdown."""
@@ -275,27 +342,27 @@ class WatcherRunner:
                 for listing in matched:
                     if not store.claim(listing, now=_utc_now(), alert=not silent):
                         continue
+                    if not silent:
+                        # The card badge always reads "Just listed", so the
+                        # real age has to come from the detail page. One extra
+                        # load per *new* listing, which is rare.
+                        age = await fetch_listed_age(self._session, listing.url)
+                        if age:
+                            listing = listing.with_listed_text(age)
+                            store.update_listed(listing.id, age, listing.listed_at)
                     new_listings.append(listing)
                     log.info(
-                        "NEW  %s  %s  (%s)", listing.price_text, listing.title, listing.location
+                        "NEW  %s  %s  (%s)  listed %s",
+                        listing.price_text,
+                        listing.title,
+                        listing.location,
+                        listing.listed_display,
                     )
                     if not silent:
                         await notifier.send(listing)
 
         self.status.last_poll_at = _utc_now()
         self.status.last_error = None
-        for listing in new_listings:
-            if not silent:
-                self.status.recent_new.append(
-                    {
-                        "id": listing.id,
-                        "title": listing.title,
-                        "price": listing.price,
-                        "location": listing.location,
-                        "url": listing.url,
-                    }
-                )
-        self.status.recent_new = self.status.recent_new[-20:]
         alerted = 0 if silent else len(new_listings)
         log.info("Poll: parsed=%d new=%d", len(cards), alerted)
         self.last_result = (len(cards), alerted)
