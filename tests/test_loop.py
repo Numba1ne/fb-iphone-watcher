@@ -10,8 +10,10 @@ Run:  python -m tests.test_loop
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +41,27 @@ TEST_EXCLUDE = (
     "not working", "screen damage", "icloud locked", "activation lock",
     "locked", "blacklisted", "bad imei", "sold",
 )
+
+
+@contextmanager
+def _capture_runner_log():
+    """Collect the messages watcher.runner emits at INFO and above."""
+    messages: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Sink(level=logging.INFO)
+    logger = logging.getLogger("watcher.runner")
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
 
 
 class FakePage:
@@ -91,7 +114,7 @@ def make_cfg(tmp: Path, **overrides: object):
 
 
 def _patches(cards, sent):
-    async def fake_open(session, cfg):
+    async def fake_open(session, cfg, url=None):
         return FakePage()
 
     async def fake_parse(page, limit):
@@ -201,7 +224,7 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir))
 
-        async def broken_open(session, cfg):
+        async def broken_open(session, cfg, url=None):
             raise RuntimeError("network down")
 
         runner = WatcherRunner(cfg)
@@ -238,6 +261,50 @@ async def main() -> int:
         check(
             f"browser restarted on schedule (restarts={FakeSession.restarts})",
             FakeSession.restarts >= 1,
+        )
+
+    # 8. Freshness gate: a listing the detail page says is old is recorded but
+    # never alerted, and its row is corrected back to notified=0.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+
+        async def old_age(session, url):
+            return "20 minutes ago"
+
+        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", old_age):
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        check("stale listing not alerted", sent == [])
+        with Store(cfg.db_path) as store:
+            rows = store.count()
+            row = store.search_listings(limit=1)[0][0]
+        check("stale listing still recorded", rows == 1)
+        check("stale listing marked not alerted", row["notified"] == 0)
+        check(
+            "stale skip is logged with its age",
+            any(m.startswith("SKIPPED (too old: 20 minutes)") for m in logs),
+        )
+
+    # 9. The gate lets a fresh listing through.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+
+        async def fresh_age(session, url):
+            return "3 minutes ago"
+
+        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", fresh_age):
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        check("fresh listing alerted", [x.id for x in sent] == ["1"])
+        check(
+            "alert is logged with the listing's age",
+            any(m.startswith("ALERT (age: 3 minutes)") for m in logs),
         )
 
     print()

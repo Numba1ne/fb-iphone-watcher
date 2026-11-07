@@ -43,6 +43,29 @@ def _estimate_listed_at(listed_text: str, now: datetime) -> str | None:
     return None
 
 
+def age_minutes(listed_text: str) -> int | None:
+    """Estimate a listing's age in whole minutes from Facebook's wording.
+
+    Returns None when the wording is too coarse to gate on ("today"). This is
+    what the freshness gate compares against, so an unknown age must never be
+    silently treated as zero.
+    """
+    if not listed_text:
+        return None
+    low = listed_text.lower().strip()
+    if low in ("just now", "just listed"):
+        return 0
+    if low == "today":
+        return None
+    if low == "yesterday":
+        return 24 * 60
+    match = _AGO.search(low)
+    if match:
+        seconds = int(match.group(1)) * _UNIT_SECONDS[match.group(2).lower()]
+        return seconds // 60
+    return None
+
+
 @dataclass(frozen=True)
 class Listing:
     """A single Marketplace listing, normalised from a scraped card."""
@@ -120,8 +143,19 @@ class SearchSpec:
     days_since_listed: int | None = 1
     override_url: str = ""
 
-    def build_url(self) -> str:
-        """Return the search URL, or the user's override verbatim."""
+    def build_url(
+        self,
+        *,
+        radius_km: int | None = None,
+        drop_max_price: bool = False,
+    ) -> str:
+        """Return the search URL, or the user's override verbatim.
+
+        `radius_km` and `drop_max_price` let the runner build a *second* search
+        that differs slightly from the primary one, so two requests together can
+        surface listings whose price or distance the primary parameters exclude.
+        Everything else stays identical.
+        """
         if self.override_url:
             return self.override_url
 
@@ -135,10 +169,15 @@ class SearchSpec:
             "lat": f"{self.latitude}",
             "lon": f"{self.longitude}",
         }
+        if radius_km is not None:
+            params["radiusKM"] = str(radius_km)
         if self.min_price is not None:
             params["minPrice"] = str(self.min_price)
         if self.max_price is not None:
             params["maxPrice"] = str(self.max_price)
+        if drop_max_price:
+            # Must come *after* the ceiling is written, or it is re-added.
+            params.pop("maxPrice", None)
         if self.days_since_listed:
             params["daysSinceListed"] = str(self.days_since_listed)
 
@@ -174,7 +213,16 @@ class AppConfig:
     # when each listing first appears there, so the saved-search push can be
     # compared against the poll. Off by default — it costs an extra page load.
     notifications_probe: bool = False
-    notifications_probe_every: int = 4
+    notifications_probe_every: int = 2
+    # Freshness gate: skip the alert when the detail page says the listing is
+    # older than this many minutes. 0 disables the gate.
+    max_listed_minutes: int = 0
+    # A second, slightly different search merged into every poll.
+    second_search: bool = False
+    second_search_radius_km: int | None = None
+    second_search_drop_max_price: bool = True
+    # Alert straight from the notifications page, before the search shows it.
+    alert_from_probe: bool = False
 
     def with_overrides(
         self,

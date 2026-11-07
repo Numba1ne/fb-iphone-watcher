@@ -3,6 +3,11 @@
 The loop and the web server run in one process and one event loop, so this
 object is the single source of truth for "is it running?". Nothing infers
 state from a log line or a PID file, which is how these two get to disagree.
+
+Design note on speed: the poll interval is only half the story. A poll cannot
+run more often than it takes to complete, so this module also keeps the work
+per poll small — one page load per search, one batched parse, and a browser
+restart every so many polls to stop a long-lived Chromium going stale.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,12 +24,15 @@ from pathlib import Path
 from . import filters
 from .browser import BrowserSession, SessionExpired
 from .marketplace import dump_debug, fetch_listed_age, open_search, parse_cards
-from .models import AppConfig, Listing
+from .models import AppConfig, Listing, age_minutes
 from .notifications import NotificationLog, fetch_alert_items
 from .notify import Notifier
 from .store import Store
 
 log = logging.getLogger(__name__)
+
+# Matches the price inside a notification's text ("New listing: iPhone 13 £280").
+_NOTIF_PRICE = re.compile(r"£\s*([\d,]+)")
 
 
 def _utc_now() -> str:
@@ -159,13 +168,7 @@ class WatcherRunner:
 
     async def _run(self) -> None:
         cfg = self.cfg
-        try:
-            self._session = BrowserSession(cfg)
-            await self._session.start()
-        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
-            log.exception("Could not start browser")
-            self.status.state = "failed"
-            self.status.last_error = f"Browser failed to start: {exc}"
+        if not await self._start_browser():
             return
 
         self.status.state = "running"
@@ -218,15 +221,22 @@ class WatcherRunner:
                 ):
                     await self._probe_notifications()
 
-                if failures >= 5 and self._session is not None:
-                    log.error("5 consecutive failures — restarting browser")
-                    await self._session.restart()
-                    failures = 0
-                    polls_since_restart = 0
+                if failures >= 5:
+                    log.error("%d consecutive failures — restarting browser", failures)
+                    try:
+                        if self._session is not None:
+                            await self._session.restart()
+                        else:
+                            await self._start_browser()
+                        failures = 0
+                        polls_since_restart = 0
+                    except Exception:  # noqa: BLE001 - next iteration retries
+                        log.exception("Browser restart failed after repeated poll failures")
+                        self._session = None
 
-                # Periodic restart to reclaim memory, as configured. A failed
-                # restart is not fatal: the next poll fails, and the 5-failure
-                # path above tries again.
+                # Periodic restart to reclaim memory and shed any per-profile
+                # staleness. A failed restart is not fatal: the next poll fails
+                # and the failure path above tries again.
                 polls_since_restart += 1
                 if (
                     cfg.restart_browser_every > 0
@@ -238,7 +248,20 @@ class WatcherRunner:
                         await self._session.restart()
                     except Exception:  # noqa: BLE001 - surfaced by the next poll
                         log.exception("Browser restart failed")
+                        self._session = None
                     polls_since_restart = 0
+
+                # A heartbeat every poll: with a 20s cadence the log would
+                # otherwise be silent for long stretches, and a silent log is
+                # indistinguishable from a hung process at 3am.
+                log.info(
+                    "HEARTBEAT poll=%d state=%s last_poll=%s failures=%d next_in=%.0fs",
+                    self.status.poll_count,
+                    self.status.state,
+                    self.status.last_poll_at,
+                    failures,
+                    wait,
+                )
 
                 # Schedule the next poll `interval` after this one *started*, so
                 # a slow page load doesn't stretch the cadence. Waiting the full
@@ -254,35 +277,18 @@ class WatcherRunner:
             self.status.next_poll_in = None
             log.info("Watcher loop stopped")
 
-    async def _probe_notifications(self) -> None:
-        """Record any listing ids newly visible in the notifications page.
-
-        Never raises: this is a measurement riding along with the poll, and a
-        failed probe must not be mistaken for a failed poll.
-        """
-        assert self._session is not None
-        if self._notif_log is None:
-            self._notif_log = NotificationLog(
-                str(Path(self.cfg.db_path).parent / "notif-log.jsonl")
-            )
+    async def _start_browser(self) -> bool:
+        """Start the browser, reporting a failure in the UI rather than raising."""
         try:
-            items = await fetch_alert_items(self._session)
-            fresh = self._notif_log.record(items)
-        except Exception:  # noqa: BLE001 - instrumentation must not break the loop
-            log.exception("Notification probe failed")
-            return
-        if fresh:
-            log.info(
-                "Notification probe: %d new listing(s) in notifications: %s",
-                len(fresh),
-                ", ".join(item["id"] for item in fresh),
-            )
-        else:
-            # Logged even when empty: without this, a probe that runs and finds
-            # nothing is indistinguishable from one that never ran.
-            log.debug(
-                "Notification probe: %d listing(s) visible, none new", len(items)
-            )
+            self._session = BrowserSession(self.cfg)
+            await self._session.start()
+            return True
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            log.exception("Could not start browser")
+            self._session = None
+            self.status.state = "failed"
+            self.status.last_error = f"Browser failed to start: {exc}"
+            return False
 
     async def _wait(self, seconds: float) -> None:
         """Sleep, honouring stop and 'poll now', while publishing the countdown."""
@@ -301,6 +307,44 @@ class WatcherRunner:
             self.status.next_poll_in = remaining
             await asyncio.sleep(min(0.5, remaining))
 
+    # ------------------------------------------------------------------ poll
+
+    def _search_urls(self) -> list[tuple[str, str]]:
+        """Return [(label, url)] — the primary search plus an optional second.
+
+        The second search differs slightly (wider radius and/or no price
+        ceiling) so the two together surface listings either one alone would
+        miss. Results are merged and de-duplicated by listing id.
+        """
+        cfg = self.cfg
+        searches = [("primary", cfg.search.build_url())]
+        if cfg.second_search:
+            alt = cfg.search.build_url(
+                radius_km=cfg.second_search_radius_km,
+                drop_max_price=cfg.second_search_drop_max_price,
+            )
+            if alt != searches[0][1]:
+                searches.append(("secondary", alt))
+        return searches
+
+    async def _fetch_cards(self, label: str, url: str) -> list[Listing]:
+        """Load one search in its own fresh page and parse it."""
+        assert self._session is not None
+        cfg = self.cfg
+        page = await open_search(self._session, cfg, url=url)
+        try:
+            cards, unparsed = await parse_cards(page, cfg.max_cards)
+            # --debug keeps an HTML/screenshot of every empty or partial parse.
+            # Without it, a dump is only written on a fully empty poll, so a
+            # months-long run doesn't fill the disk with pages.
+            if cfg.debug or not cards:
+                await dump_debug(page, cfg.debug_dir, f"no-cards-{label}")
+            if unparsed:
+                log.warning("%s search: %d card(s) could not be parsed", label, unparsed)
+            return cards
+        finally:
+            await page.close()
+
     async def _poll(self) -> int:
         """One scrape. Returns parsed count; raises on failure.
 
@@ -310,18 +354,30 @@ class WatcherRunner:
         cfg = self.cfg
         assert self._session is not None
 
-        page = await open_search(self._session, cfg)
-        try:
-            cards, unparsed = await parse_cards(page, cfg.max_cards)
-            # --debug keeps an HTML/screenshot of every empty or partial parse.
-            # Without it, a dump is only written on a fully empty poll, so a
-            # months-long run doesn't fill the disk with pages.
-            if cfg.debug or not cards:
-                await dump_debug(page, cfg.debug_dir, "no-cards")
-            if unparsed:
-                log.warning("%d card(s) could not be parsed", unparsed)
-        finally:
-            await page.close()
+        searches = self._search_urls()
+        results = await asyncio.gather(
+            *(self._fetch_cards(label, url) for label, url in searches),
+            return_exceptions=True,
+        )
+
+        cards: list[Listing] = []
+        seen: set[str] = set()
+        errors: list[str] = []
+        for (label, _url), result in zip(searches, results):
+            if isinstance(result, BaseException):
+                errors.append(f"{label}: {result}")
+                continue
+            for card in result:
+                if card.id not in seen:
+                    seen.add(card.id)
+                    cards.append(card)
+
+        if errors:
+            for err in errors:
+                log.warning("Search failed — %s", err)
+            # One search failing is survivable; both failing is a failed poll.
+            if not cards:
+                raise RuntimeError("; ".join(errors))
 
         matched = filters.apply(
             cards,
@@ -331,39 +387,160 @@ class WatcherRunner:
             max_price=cfg.search.max_price,
         )
 
+        alerted = 0
         with Store(cfg.db_path) as store:
             first_run = store.is_empty
             silent = first_run and cfg.first_run_silent
             if first_run:
                 log.info("First run — recording %d existing listing(s) silently", len(matched))
 
-            new_listings: list[Listing] = []
+            # Claim first: claim() is the atomic "have we seen this?" check, so
+            # it must happen before any slow work. `fresh` is the rare set of
+            # listings that are genuinely new to us.
+            fresh = [
+                listing
+                for listing in matched
+                if store.claim(listing, now=_utc_now(), alert=not silent)
+            ]
+
+            # Read every new listing's detail page *concurrently*. Done in
+            # sequence, a poll that found nine new listings spent over a minute
+            # just on age lookups — which is exactly the latency this bot is
+            # trying to avoid. The semaphore keeps the burst from looking like
+            # a flood to Facebook.
+            ages: dict[str, str] = {}
+            if not silent and fresh:
+                gate = asyncio.Semaphore(4)
+
+                async def _age(listing: Listing) -> tuple[str, str]:
+                    async with gate:
+                        return listing.id, await fetch_listed_age(
+                            self._session, listing.url
+                        )
+
+                results = await asyncio.gather(
+                    *(_age(item) for item in fresh), return_exceptions=True
+                )
+                for item in results:
+                    if isinstance(item, tuple):
+                        ages[item[0]] = item[1]
+
             async with Notifier(cfg) as notifier:
-                for listing in matched:
-                    if not store.claim(listing, now=_utc_now(), alert=not silent):
-                        continue
+                for listing in fresh:
+                    minutes: int | None = None
                     if not silent:
-                        # The card badge always reads "Just listed", so the
-                        # real age has to come from the detail page. One extra
-                        # load per *new* listing, which is rare.
-                        age = await fetch_listed_age(self._session, listing.url)
-                        if age:
-                            listing = listing.with_listed_text(age)
-                            store.update_listed(listing.id, age, listing.listed_at)
-                    new_listings.append(listing)
+                        age_text = ages.get(listing.id, "")
+                        if age_text:
+                            listing = listing.with_listed_text(age_text)
+                            store.update_listed(listing.id, age_text, listing.listed_at)
+                        minutes = age_minutes(listing.listed_text)
+
+                        # Freshness gate: if the detail page says this listing
+                        # is older than the threshold, it is not what we are
+                        # racing for. Record it, but stay quiet.
+                        if (
+                            cfg.max_listed_minutes > 0
+                            and minutes is not None
+                            and minutes > cfg.max_listed_minutes
+                        ):
+                            store.set_notified(listing.id, False)
+                            log.info(
+                                "SKIPPED (too old: %d minutes) \u2013 %s \u2013 %s",
+                                minutes,
+                                listing.title,
+                                listing.price_text,
+                            )
+                            continue
+
                     log.info(
-                        "NEW  %s  %s  (%s)  listed %s",
-                        listing.price_text,
+                        "ALERT (age: %s) \u2013 %s \u2013 %s  (%s)",
+                        "unknown" if minutes is None else f"{minutes} minutes",
                         listing.title,
+                        listing.price_text,
                         listing.location,
-                        listing.listed_display,
                     )
                     if not silent:
                         await notifier.send(listing)
+                        alerted += 1
 
         self.status.last_poll_at = _utc_now()
         self.status.last_error = None
-        alerted = 0 if silent else len(new_listings)
         log.info("Poll: parsed=%d new=%d", len(cards), alerted)
         self.last_result = (len(cards), alerted)
         return len(cards)
+
+    # --------------------------------------------------------------- probe
+
+    async def _probe_notifications(self) -> None:
+        """Record any listing ids newly visible in the notifications page.
+
+        Never raises: this is a measurement riding along with the poll, and a
+        failed probe must not be mistaken for a failed poll. When
+        `alert_from_probe` is on it also fires an early alert, which is the
+        whole reason the saved search exists — Facebook's push can surface a
+        listing before our own search request sees it.
+        """
+        assert self._session is not None
+        if self._notif_log is None:
+            self._notif_log = NotificationLog(
+                str(Path(self.cfg.db_path).parent / "notif-log.jsonl")
+            )
+        try:
+            items = await fetch_alert_items(self._session)
+            fresh = self._notif_log.record(items)
+        except Exception:  # noqa: BLE001 - instrumentation must not break the loop
+            log.exception("Notification probe failed")
+            return
+
+        if not fresh:
+            # Logged even when empty: without this, a probe that runs and finds
+            # nothing is indistinguishable from one that never ran.
+            log.debug(
+                "Notification probe: %d listing(s) visible, none new", len(items)
+            )
+            return
+
+        log.info(
+            "Notification probe: %d new listing(s) in notifications: %s",
+            len(fresh),
+            ", ".join(item["id"] for item in fresh),
+        )
+        if self.cfg.alert_from_probe:
+            await self._alert_from_probe(fresh)
+
+    async def _alert_from_probe(self, fresh: list[dict]) -> None:
+        """Alert on listings the notifications page surfaced first.
+
+        The notification's text is all we have, so the same title filters are
+        applied to it; anything they reject is left for the search poll to
+        judge properly. A claimed id is also how we stop the next poll from
+        alerting the same listing a second time.
+        """
+        cfg = self.cfg
+        async with Notifier(cfg) as notifier:
+            for item in fresh:
+                text = item.get("text") or ""
+                price_match = _NOTIF_PRICE.search(text)
+                listing = Listing.from_card(
+                    item_id=str(item["id"]),
+                    title=text or "Marketplace listing",
+                    price=(
+                        int(price_match.group(1).replace(",", ""))
+                        if price_match
+                        else None
+                    ),
+                    location="saved-search alert",
+                    listed_text=item.get("age_text") or "",
+                )
+                matched = filters.apply(
+                    [listing],
+                    require_any=cfg.require_any,
+                    exclude=cfg.exclude,
+                )
+                if not matched:
+                    continue
+                with Store(cfg.db_path) as store:
+                    if not store.claim(listing, now=_utc_now(), alert=True):
+                        continue
+                log.info("PROBE NEW  %s  (from notification)", listing.title)
+                await notifier.send(listing)

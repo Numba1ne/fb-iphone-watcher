@@ -20,12 +20,25 @@ search:
   search_url_override: ""
 
 polling:
-  # 30s + up to 5s jitter, plus a few seconds of page load, keeps detection
-  # under a minute. Minimum 15 — anything faster risks a Facebook block.
-  interval_seconds: 30
-  jitter_seconds: 5          # random +/- seconds so polling isn't metronomic
+  # Aggressive detection. 20s is about as fast as this is worth running: a poll
+  # takes several seconds to load and parse, so real cadence is bounded by poll
+  # duration long before it is bounded by this number. Hard minimum is 15 —
+  # anything faster is a fast route to a temporary Facebook block.
+  interval_seconds: 20
+  jitter_seconds: 3          # random +/- seconds so polling isn't metronomic
   max_cards: 30              # newest-first, so the top of the page is enough
-  restart_browser_every: 100 # polls between browser restarts, to free memory
+  # Restart Chromium every N polls. Frequent restarts shed per-profile
+  # staleness and memory growth, which matter on a 24/7 run. 15–25 is the
+  # useful range; 0 disables it.
+  restart_browser_every: 20
+
+freshness:
+  # A second search with slightly different parameters, merged into the same
+  # poll and de-duplicated by listing id. This catches listings whose price or
+  # distance the primary search's parameters exclude. Set false to poll once.
+  second_search: true
+  second_search_radius_km: 40         # usually wider than search.radius_km
+  second_search_drop_max_price: true  # secondary ignores search.max_price
 
 browser:
   headless: true             # false to watch it work in a visible window
@@ -59,12 +72,27 @@ notifications:
   discord: true
   # On the very first run, record existing listings without alerting on them.
   first_run_silent: true
-  # Measurement, not alerting. Every `probe_every` polls, read the Facebook
-  # notifications page and record the first moment each listing appears in a
-  # saved-search alert. `python tools/notify_race.py` then compares that
-  # against the poll. Costs one extra page load per probe; set false to stop.
+
+  # Only alert if the listing is at most this many minutes old. 0 (or null)
+  # disables the filter and alerts on everything new.
+  #
+  # When a listing is new to us, the bot opens its detail page once to read the
+  # real age — the search card badges everything "Just listed". The listing is
+  # still recorded and shown on the dashboard when it is too old; only the
+  # Telegram/Discord alert is suppressed. If the age cannot be read it alerts
+  # anyway, so a parsing change never silently swallows listings.
+  max_age_minutes: 8
+
+  # Saved-search probe. Requires a saved search created on the account
+  # (python tools/save_search.py). Every `probe_every` polls, read the Facebook
+  # notifications page.
   probe: false
-  probe_every: 4
+  # Alert straight from a notification, before the search poll sees the item.
+  # This is the fastest possible path, but a notification carries only text,
+  # so filters run against that text. Off by default; a claimed id stops the
+  # next poll alerting the same listing twice.
+  alert_from_probe: false
+  probe_every: 2
 
 paths:
   db: "data/bot.db"

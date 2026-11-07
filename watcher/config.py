@@ -72,6 +72,7 @@ def load(config_path: str | Path | None = None) -> AppConfig:
     filters = raw.get("filters") or {}
     notifications = raw.get("notifications") or {}
     paths = raw.get("paths") or {}
+    freshness = raw.get("freshness") or {}
 
     min_price = _as_int(search.get("min_price"), "search.min_price")
     max_price = _as_int(search.get("max_price"), "search.max_price")
@@ -80,11 +81,12 @@ def load(config_path: str | Path | None = None) -> AppConfig:
             f"search.min_price (£{min_price}) is above search.max_price (£{max_price})."
         )
 
-    interval = float(_get(polling, "interval_seconds", 45))
+    interval = float(_get(polling, "interval_seconds", 20))
     if interval < 15:
         raise ConfigError(
             f"polling.interval_seconds is {interval:.0f}s. Under 15s is a fast way to "
-            f"get a temporary Facebook block — use 45s unless you have a reason."
+            f"get a temporary Facebook block. 20s is the aggressive setting; 30s is "
+            f"the safer one."
         )
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -134,6 +136,20 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         override_url=str(_get(search, "search_url_override", "")).strip(),
     )
 
+    # `notifications.max_age_minutes` is the documented key. The older
+    # `freshness.max_listed_minutes` spelling is still honoured so an existing
+    # config.yaml keeps working; null or 0 disables the gate either way.
+    raw_max_age = notifications.get("max_age_minutes")
+    if raw_max_age is None:
+        raw_max_age = freshness.get("max_listed_minutes", 0)
+    max_listed = _as_int(raw_max_age, "notifications.max_age_minutes") or 0
+    if max_listed < 0:
+        raise ConfigError("notifications.max_age_minutes must be 0 or more.")
+
+    second_radius = _as_int(
+        freshness.get("second_search_radius_km"), "freshness.second_search_radius_km"
+    )
+
     # Relative paths resolve against the project root so the bot behaves the
     # same whether launched by hand or by Task Scheduler.
     def resolve(value: str) -> str:
@@ -143,9 +159,9 @@ def load(config_path: str | Path | None = None) -> AppConfig:
     return AppConfig(
         search=spec,
         interval_seconds=interval,
-        jitter_seconds=float(_get(polling, "jitter_seconds", 8)),
+        jitter_seconds=float(_get(polling, "jitter_seconds", 3)),
         max_cards=int(_get(polling, "max_cards", 30)),
-        restart_browser_every=int(_get(polling, "restart_browser_every", 100)),
+        restart_browser_every=int(_get(polling, "restart_browser_every", 20)),
         headless=_as_bool(browser.get("headless"), True),
         user_data_dir=resolve(str(_get(browser, "user_data_dir", "data/browser-profile"))),
         navigation_timeout_ms=int(_get(browser, "navigation_timeout_ms", 30000)),
@@ -162,6 +178,13 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         discord_webhook_url=discord_url,
         notifications_probe=_as_bool(notifications.get("probe"), False),
         notifications_probe_every=max(
-            1, int(_get(notifications, "probe_every", 4))
+            1, int(_get(notifications, "probe_every", 2))
         ),
+        max_listed_minutes=max_listed,
+        second_search=_as_bool(freshness.get("second_search"), False),
+        second_search_radius_km=second_radius,
+        second_search_drop_max_price=_as_bool(
+            freshness.get("second_search_drop_max_price"), True
+        ),
+        alert_from_probe=_as_bool(notifications.get("alert_from_probe"), False),
     )

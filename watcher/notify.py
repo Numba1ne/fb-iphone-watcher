@@ -57,6 +57,25 @@ class Notifier:
                 ok = True
         return ok
 
+    async def send_text(self, text: str) -> bool:
+        """Send a plain message to every enabled channel. True if any worked."""
+        tasks = []
+        if self.cfg.telegram:
+            tasks.append(self._telegram_message(text))
+        if self.cfg.discord:
+            tasks.append(self._discord_message(text))
+        if not tasks:
+            log.warning("No delivery channel configured — message not sent")
+            return False
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        ok = False
+        for result in results:
+            if isinstance(result, Exception):
+                log.error("Notification failed: %s", result)
+            elif result:
+                ok = True
+        return ok
+
     async def send_test(self) -> bool:
         """Send a sample alert so the user can confirm wiring end-to-end."""
         sample = Listing.from_card(

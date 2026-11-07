@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from watcher import filters  # noqa: E402
 from watcher.marketplace import _parse_location, _parse_title  # noqa: E402
-from watcher.models import Listing, SearchSpec  # noqa: E402
+from watcher.models import Listing, SearchSpec, age_minutes  # noqa: E402
 from watcher.store import Store  # noqa: E402
 
 EXCLUDE = (
@@ -231,6 +231,44 @@ def test_store_survives_reopen():
         with Store(path) as store:
             assert store.count() == 1
             assert not store.is_empty
+
+
+# ---------------------------------------------------------------- freshness
+
+
+def test_age_minutes_just_now():
+    assert age_minutes("just now") == 0
+
+
+def test_age_minutes_units():
+    assert age_minutes("just listed") == 0
+    assert age_minutes("1 minute ago") == 1
+    assert age_minutes("5 minutes ago") == 5
+    assert age_minutes("23 minutes ago") == 23
+    assert age_minutes("2 hours ago") == 120
+    assert age_minutes("8 hours ago") == 480
+    assert age_minutes("1 day ago") == 24 * 60
+    # Facebook sometimes includes the "Listed" prefix in the raw text.
+    assert age_minutes("Listed 8 hours ago") == 480
+
+
+def test_age_minutes_unknown_when_coarse():
+    # "today" is too coarse to gate on, so it must not read as zero.
+    assert age_minutes("today") is None
+    assert age_minutes("") is None
+
+
+def test_secondary_url_changes_radius_and_drops_ceiling():
+    spec = SearchSpec("london", "iphone", 100, 1200, 25, 51.5, -0.12)
+    qs = parse_qs(urlparse(spec.build_url(radius_km=40, drop_max_price=True)).query)
+    assert qs["radiusKM"] == ["40"]
+    assert "maxPrice" not in qs
+    assert qs["minPrice"] == ["100"]
+
+
+def test_secondary_url_matches_primary_when_unchanged():
+    spec = SearchSpec("london", "iphone", 100, 1200, 25, 51.5, -0.12)
+    assert spec.build_url() == spec.build_url(radius_km=25, drop_max_price=False)
 
 
 if __name__ == "__main__":

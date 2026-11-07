@@ -8,6 +8,7 @@ listing link itself, and each field falls back to a second strategy.
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 from pathlib import Path
@@ -51,58 +52,86 @@ _LISTED_DETAIL = re.compile(
 )
 
 
-async def open_search(session: BrowserSession, cfg: AppConfig) -> Page:
-    """Open the configured search URL and confirm we landed on results."""
+def _bust_cache(url: str) -> str:
+    """Return `url` with unique, ignorable parameters so nothing is reused.
+
+    Facebook's search page comes from an edge cache. A whole-millisecond
+    timestamp can collide when two searches fire in the same tick, so a
+    fractional-time nonce and a random value are added too. Facebook ignores
+    all of them; they exist only to make every request distinct.
+    """
+    sep = "&" if "?" in url else "?"
+    nonce = f"{time.time():.6f}".replace(".", "")
+    return (
+        f"{url}{sep}_cb={int(time.time() * 1000)}"
+        f"&_nonce={nonce}&_r={random.randrange(1_000_000)}"
+    )
+
+
+async def open_search(
+    session: BrowserSession, cfg: AppConfig, *, url: str | None = None
+) -> Page:
+    """Open a search URL and confirm we landed on results.
+
+    Always a brand-new page: nothing is reused between polls, so no rendering
+    state, scroll position or in-page cache survives into the next request.
+    The caller owns the returned page and must close it.
+    """
     page = await session.new_page()
-    url = cfg.search.build_url()
-    # Facebook serves this page from an edge cache. A unique parameter makes
-    # each poll a distinct request, so a poll can never be handed a snapshot
-    # older than the one before it. Facebook ignores the parameter itself.
-    url += ("&" if "?" in url else "?") + f"_cb={int(time.time() * 1000)}"
-    log.debug("Navigating to %s", url)
+    target = _bust_cache(url or cfg.search.build_url())
+    log.debug("Navigating to %s", target)
 
     try:
-        await page.goto(url, wait_until="domcontentloaded")
+        await page.goto(target, wait_until="domcontentloaded")
     except PlaywrightTimeout as exc:
         await page.close()
-        raise RuntimeError(f"Timed out loading search page: {url}") from exc
+        raise RuntimeError(f"Timed out loading search page: {target}") from exc
 
     await session.assert_logged_in(page)
 
     try:
-        await page.wait_for_selector(SELECTORS["listing_anchor"], timeout=15000)
+        # Short on purpose: this only decides how long to wait for the first
+        # card before parsing anyway. At 15s an empty secondary search added a
+        # quarter of a minute to every poll.
+        await page.wait_for_selector(SELECTORS["listing_anchor"], timeout=8000)
     except PlaywrightTimeout:
         # Not fatal by itself — an empty result set for a narrow search is
         # legitimate. The caller decides whether zero listings is suspicious.
-        log.debug("No listing anchors appeared within 15s")
+        log.debug("No listing anchors appeared within 8s")
 
     return page
 
 
-async def _card_lines(anchor) -> list[str]:
-    """Return the card's text as discrete lines.
-
-    Deliberately not `innerText`: it joins sibling inline spans with a *space*,
-    turning "£280" + "Croydon, London" into one "£280 Croydon, London" line, so
-    the location could never be told apart from the price. Querying the leaf
-    spans keeps each value separate, which is what the field parsers need.
-    One round-trip per card, since Facebook's cards are text-in-spans.
-    """
-    lines = await anchor.evaluate(
-        """el => {
-            let node = el;
-            for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
-                if (/£\\s*\\d/.test(node.innerText || '')) break;
-            }
-            if (!node) return [];
-            const leaves = [...node.querySelectorAll('span')]
-                .filter(s => !s.querySelector('span'));
-            return leaves
-                .map(s => (s.textContent || '').trim())
-                .filter(t => t.length > 0);
-        }"""
-    )
-    return lines or []
+_COLLECT_JS = r"""
+(limit) => {
+    const out = [];
+    const seen = new Set();
+    for (const a of document.querySelectorAll('a[href*="/marketplace/item/"]')) {
+        const m = (a.getAttribute('href') || '').match(/\/marketplace\/item\/(\d+)/);
+        if (!m) continue;
+        const id = m[1];
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (out.length >= limit) break;
+        let node = a;
+        for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+            if (/£\s*\d/.test(node.innerText || '')) break;
+        }
+        if (!node) continue;
+        const leaves = [...node.querySelectorAll('span')]
+            .filter(s => !s.querySelector('span'))
+            .map(s => (s.textContent || '').trim())
+            .filter(t => t.length > 0);
+        const img = a.querySelector('img[alt]');
+        out.push({
+            id: id,
+            lines: leaves,
+            alt: img ? (img.getAttribute('alt') || '') : ''
+        });
+    }
+    return out;
+}
+"""
 
 
 def _parse_title(text_lines: list[str], image_alt: str) -> str:
@@ -192,27 +221,20 @@ def _strip_location_suffix(title: str, location: str) -> str:
 async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
     """Extract listings from the current page.
 
-    Returns (listings, parsed_count) where parsed_count counts anchors seen,
-    so the caller can tell "no anchor broke" from "no cards found".
+    Returns (listings, unparsed) where `unparsed` counts cards whose text could
+    not be read, so the caller can tell "the page changed" from "no cards".
+
+    Every card is collected in a single evaluate() instead of one round-trip
+    per card. The old per-anchor loop cost ~2 round-trips per card, which on a
+    24-card page was most of the poll's wall time — and poll latency is the
+    thing standing between us and a 4-minute-old listing.
     """
-    anchors = await page.query_selector_all(SELECTORS["listing_anchor"])
+    rows = await page.evaluate(_COLLECT_JS, limit)
     listings: list[Listing] = []
-    seen: set[str] = set()
     unparsed = 0
 
-    for anchor in anchors:
-        if len(listings) >= limit:
-            break
-        href = await anchor.get_attribute("href") or ""
-        match = _ITEM_ID.search(href)
-        if not match:
-            continue
-        item_id = match.group(1)
-        if item_id in seen:
-            continue
-        seen.add(item_id)
-
-        lines = await _card_lines(anchor)
+    for row in rows or []:
+        lines = row.get("lines") or []
         if not lines:
             unparsed += 1
             continue
@@ -224,12 +246,7 @@ async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
                 price = int(price_match.group(1).replace(",", ""))
                 break
 
-        image_alt = ""
-        img = await anchor.query_selector(SELECTORS["card_image_alt"])
-        if img is not None:
-            image_alt = (await img.get_attribute("alt") or "").strip()
-
-        title = _parse_title(lines, image_alt)
+        title = _parse_title(lines, row.get("alt") or "")
         if not title:
             unparsed += 1
             continue
@@ -237,7 +254,7 @@ async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
         location = _parse_location(lines)
         listings.append(
             Listing.from_card(
-                item_id=item_id,
+                item_id=str(row["id"]),
                 title=_strip_location_suffix(title, location),
                 price=price,
                 location=location,

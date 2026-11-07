@@ -1,6 +1,6 @@
 # Facebook Marketplace iPhone Watcher
 
-Polls Facebook Marketplace every ~30 seconds, and sends you a Telegram and/or
+Polls Facebook Marketplace every ~20 seconds, and sends you a Telegram and/or
 Discord alert the moment a new matching iPhone listing appears — typically
 within a minute of it being posted. Remembers what it has already seen, so you
 are never told about the same listing twice.
@@ -170,12 +170,32 @@ nothing outside this machine can connect.
 | `search.min_price` / `max_price` | `100` / `1200` | Price band in £, either can be `""` for open |
 | `search.days_since_listed` | `1` | Recency window in days; `0` removes it |
 | `search.search_url_override` | `""` | Paste a full Marketplace URL to override everything |
-| `polling.interval_seconds` | `30` | Minimum 15 |
-| `polling.jitter_seconds` | `5` | Random ± on the interval |
+| `polling.interval_seconds` | `20` | Aggressive; hard minimum 15 |
+| `polling.jitter_seconds` | `3` | Random ± on the interval |
+| `polling.restart_browser_every` | `20` | Chromium restarts every N polls |
+| `notifications.max_age_minutes` | `8` | Alert only if the listing is this fresh; `0` disables |
+| `freshness.second_search` | `true` | Also poll a wider/no-ceiling variant and merge |
+| `freshness.second_search_radius_km` | `40` | Radius for the secondary search |
+| `notifications.alert_from_probe` | `false` | Alert straight from a saved-search notification |
 | `filters.require_any` | `["iphone"]` | Title must contain one |
 | `filters.exclude` | parts/cracked/locked… | Title containing any is dropped |
 | `notifications.first_run_silent` | `true` | Record existing listings without alerting |
 | `browser.headless` | `true` | `false` to watch it work |
+
+**How fresh you can actually get:** the interval is only half the story. A
+poll cannot start before the previous one finished, so if a page load plus
+parse takes longer than `interval_seconds`, the real cadence is the poll
+duration. Two things keep that small: each card is parsed in a single
+evaluation rather than a round-trip per field, and the browser is restarted
+every `restart_browser_every` polls so it never accumulates state. Watch the
+`HEARTBEAT` lines in the log to see the true cadence.
+
+The freshness gate is what turns "new to us" into "actually new". The
+search card badges every listing "Just listed", so when a listing is new the
+bot opens its detail page once to read the real age, and stays quiet unless
+it is within `notifications.max_age_minutes`. Listings whose age cannot be read
+are alerted anyway rather than silently dropped. An older config may still say
+`freshness.max_listed_minutes`; that spelling is honoured too.
 
 **Changing location:** set `city_slug`, `latitude` and `longitude` together.
 Find coordinates by right-clicking a spot in Google Maps — the first number is

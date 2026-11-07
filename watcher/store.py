@@ -113,6 +113,19 @@ class Store:
         )
         self._conn.commit()
 
+    def set_notified(self, listing_id: str, notified: bool) -> None:
+        """Correct the alerted flag after the fact.
+
+        claim() has to run before the detail page is fetched, so a listing that
+        turns out to be too old was recorded as "alerted" by default. This puts
+        the row back to the truth so the dashboard count stays honest.
+        """
+        self._conn.execute(
+            "UPDATE listings SET notified = ? WHERE id = ?",
+            (int(notified), listing_id),
+        )
+        self._conn.commit()
+
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
 

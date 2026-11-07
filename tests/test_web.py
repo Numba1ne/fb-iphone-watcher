@@ -72,7 +72,7 @@ def main() -> int:
         runner = WatcherRunner(cfg)
         app = create_app(cfg, runner, autostart=False)
 
-        async def fake_open(session, cfg):
+        async def fake_open(session, cfg, url=None):
             return FakePage()
 
         async def fake_parse(page, limit):

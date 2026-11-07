@@ -58,7 +58,13 @@ class BrowserSession:
             timezone_id="Europe/London",
             # A locale/geo mismatch with the session's cookies is a classic
             # trigger for Facebook's "something went wrong" screens.
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                # Facebook serves the search page from an edge cache. This keeps
+                # the local profile from layering a second cache in front of it.
+                "--disable-application-cache",
+                "--disk-cache-size=1048576",
+            ],
         )
         self._context.set_default_navigation_timeout(self.cfg.navigation_timeout_ms)
         log.info("Browser started (headless=%s)", self.cfg.headless)
@@ -85,6 +91,14 @@ class BrowserSession:
         await page.route(
             "**/*.{png,jpg,jpeg,gif,webp,svg,mp4,woff,woff2}",
             lambda route: route.abort(),
+        )
+        # Ask every origin not to hand us a cached document. The URL nonce in
+        # open_search() covers the edge cache; these cover the browser.
+        await page.set_extra_http_headers(
+            {
+                "Cache-Control": "no-cache, no-store, max-age=0",
+                "Pragma": "no-cache",
+            }
         )
         return page
 
