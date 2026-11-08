@@ -400,12 +400,6 @@ class WatcherRunner:
             # when the bot comes up is recorded, shown on the dashboard, and
             # never announced — only listings that appear afterwards are news.
             silent = self._startup_poll and cfg.first_run_silent
-            if silent:
-                log.info(
-                    "Startup — recording %d existing listing(s) silently; "
-                    "alerts begin with the next poll",
-                    len(matched),
-                )
 
             # Claim first: claim() is the atomic "have we seen this?" check, so
             # it must happen before any slow work. `fresh` is the rare set of
@@ -417,6 +411,16 @@ class WatcherRunner:
             ]
             if matched:
                 self._startup_poll = False
+
+            if silent:
+                # Both counts, because they answer different questions: how much
+                # the page holds, and how much of it was not already known.
+                log.info(
+                    "Startup — warm-up poll: %d listing(s) on the page, %d new to "
+                    "us; nothing announced, they were already listed",
+                    len(matched),
+                    len(fresh),
+                )
 
             # Read every new listing's detail page *concurrently*. Done in
             # sequence, a poll that found nine new listings spent over a minute
