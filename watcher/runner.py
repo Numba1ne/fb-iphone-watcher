@@ -403,11 +403,14 @@ class WatcherRunner:
 
             # Claim first: claim() is the atomic "have we seen this?" check, so
             # it must happen before any slow work. `fresh` is the rare set of
-            # listings that are genuinely new to us.
+            # listings that are genuinely new to us. They are claimed as *not*
+            # yet told: the row only flips to notified=1 once a send actually
+            # succeeds, so the dashboard never shows ALERTED for a listing the
+            # age gate is about to drop.
             fresh = [
                 listing
                 for listing in matched
-                if store.claim(listing, now=_utc_now(), alert=not silent)
+                if store.claim(listing, now=_utc_now(), alert=False)
             ]
             if matched:
                 self._startup_poll = False
@@ -484,10 +487,9 @@ class WatcherRunner:
                             listing.price_text,
                             listing.location,
                         )
-                        await notifier.send(listing)
-                        # It was claimed as a silent record, so correct the row.
-                        store.set_notified(listing.id, True)
-                        alerted += 1
+                        if await notifier.send(listing):
+                            store.set_notified(listing.id, True)
+                            alerted += 1
                         continue
 
                     # Freshness gate: if the detail page says this listing is
@@ -498,7 +500,6 @@ class WatcherRunner:
                         and minutes is not None
                         and minutes > cfg.max_listed_minutes
                     ):
-                        store.set_notified(listing.id, False)
                         log.info(
                             "SKIPPED (too old: %d min)  %s  %s  (%s)",
                             minutes,
@@ -515,8 +516,9 @@ class WatcherRunner:
                         listing.price_text,
                         listing.location,
                     )
-                    await notifier.send(listing)
-                    alerted += 1
+                    if await notifier.send(listing):
+                        store.set_notified(listing.id, True)
+                        alerted += 1
 
             if silent:
                 # Both counts, because they answer different questions: how much
@@ -606,7 +608,8 @@ class WatcherRunner:
                 if not matched:
                     continue
                 with Store(cfg.db_path) as store:
-                    if not store.claim(listing, now=_utc_now(), alert=True):
+                    if not store.claim(listing, now=_utc_now(), alert=False):
                         continue
-                log.info("PROBE NEW  %s  (from notification)", listing.title)
-                await notifier.send(listing)
+                    log.info("PROBE NEW  %s  (from notification)", listing.title)
+                    if await notifier.send(listing):
+                        store.set_notified(listing.id, True)

@@ -82,9 +82,11 @@ class Store:
         `INSERT OR IGNORE` makes the "is this new?" check atomic — a restart
         mid-loop can't re-notify something already in the table.
 
-        `alert` records whether we *tried* to notify: True for a live alert,
-        False for a first-run (silent) record. It is informational; dedupe is
-        by primary key, so either value means "seen".
+        `alert` sets the row's initial notified flag. Callers that claim before
+        deciding (the poll claims, then reads the age before alerting) should
+        pass False and call `set_notified(..., True)` once a send has actually
+        succeeded; otherwise the dashboard briefly advertises an alert that the
+        age gate then drops.
         """
         cursor = self._conn.execute(
             "INSERT OR IGNORE INTO listings "
@@ -114,11 +116,11 @@ class Store:
         self._conn.commit()
 
     def set_notified(self, listing_id: str, notified: bool) -> None:
-        """Correct the alerted flag after the fact.
+        """Record whether an alert actually reached a channel.
 
-        claim() has to run before the detail page is fetched, so a listing that
-        turns out to be too old was recorded as "alerted" by default. This puts
-        the row back to the truth so the dashboard count stays honest.
+        Rows are inserted as unseen; this flips them to told once a send
+        succeeds, so the dashboard's ALERTED chip and count mean "delivered"
+        rather than "we meant to".
         """
         self._conn.execute(
             "UPDATE listings SET notified = ? WHERE id = ?",

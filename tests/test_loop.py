@@ -326,6 +326,9 @@ async def main() -> int:
             with _capture_runner_log() as logs:
                 await runner.poll_once()
         check("fresh listing alerted", [x.id for x in sent] == ["1"])
+        with Store(cfg.db_path) as store:
+            row = store.search_listings(limit=1)[0][0]
+        check("the delivered alert marks the row as told", row["notified"] == 1)
         check(
             "alert is logged with the listing's age",
             any(m.startswith("ALERT (age: 3 min)") for m in logs),
@@ -387,6 +390,29 @@ async def main() -> int:
 
     sent, _, _ = await _warmup_run("3 minutes ago", max_listed_minutes=0)
     check("warm-up stays quiet when the gate is disabled", sent == [])
+
+    # 13. A delivery that fails is not recorded as an alert. The dashboard's
+    # ALERTED chip must mean "delivered", not "attempted".
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(CARD_LIST, [])
+        from watcher.notify import Notifier
+
+        async def failing_send(self, listing):
+            return False
+
+        async def fresh_age(session, url):
+            return "2 minutes ago"
+
+        with p1, p2, p3, p4, patch.object(
+            Notifier, "send", failing_send
+        ), patch.object(runner_mod, "fetch_listed_age", fresh_age):
+            await runner.poll_once()
+        with Store(cfg.db_path) as store:
+            row = store.search_listings(limit=1)[0][0]
+        check("a failed send leaves the row untold", row["notified"] == 0)
+        check("a failed send is not counted as an alert", runner.last_result[1] == 0)
 
     print()
     if failures:
