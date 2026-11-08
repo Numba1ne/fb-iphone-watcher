@@ -412,23 +412,17 @@ class WatcherRunner:
             if matched:
                 self._startup_poll = False
 
-            if silent:
-                # Both counts, because they answer different questions: how much
-                # the page holds, and how much of it was not already known.
-                log.info(
-                    "Startup — warm-up poll: %d listing(s) on the page, %d new to "
-                    "us; nothing announced, they were already listed",
-                    len(matched),
-                    len(fresh),
-                )
-
             # Read every new listing's detail page *concurrently*. Done in
             # sequence, a poll that found nine new listings spent over a minute
             # just on age lookups — which is exactly the latency this bot is
             # trying to avoid. The semaphore keeps the burst from looking like
             # a flood to Facebook.
+            #
+            # The warm-up poll reads them too: mostly that is yesterday's
+            # backlog, but one entry may have been posted while the bot was
+            # down, and its real age is the only thing that tells them apart.
             ages: dict[str, str] = {}
-            if not silent and fresh:
+            if fresh:
                 gate = asyncio.Semaphore(4)
 
                 async def _age(listing: Listing) -> tuple[str, str]:
@@ -444,19 +438,21 @@ class WatcherRunner:
                     if isinstance(item, tuple):
                         ages[item[0]] = item[1]
 
+            def _proven_fresh(minutes: int | None) -> bool:
+                """Only an age we actually read can prove a listing is fresh.
+
+                An unreadable age is not evidence, and during a warm-up
+                "not proven" must mean "stay quiet" — otherwise one timeout
+                replay the whole backlog, which is the bug this replaced.
+                """
+                return (
+                    cfg.max_listed_minutes > 0
+                    and minutes is not None
+                    and minutes <= cfg.max_listed_minutes
+                )
+
             async with Notifier(cfg) as notifier:
                 for listing in fresh:
-                    # Warm-up: recorded and visible on the dashboard, but it was
-                    # already listed when the bot came up, so it is not news.
-                    if silent:
-                        log.info(
-                            "RECORDED (startup)  %s  %s  (%s)",
-                            listing.title,
-                            listing.price_text,
-                            listing.location,
-                        )
-                        continue
-
                     age_text = ages.get(listing.id, "")
                     if age_text:
                         listing = listing.with_listed_text(age_text)
@@ -467,6 +463,32 @@ class WatcherRunner:
                     # fresh and alert — which is exactly how the whole backlog
                     # got announced after an overnight stop.
                     minutes = age_minutes(age_text)
+
+                    if silent:
+                        # Warm-up: announce only what the detail page proves was
+                        # posted while the bot was down. Yesterday's listings and
+                        # anything unreadable stay quiet, visible on the
+                        # dashboard under All seen.
+                        if not _proven_fresh(minutes):
+                            log.info(
+                                "RECORDED (startup)  %s  %s  (%s)",
+                                listing.title,
+                                listing.price_text,
+                                listing.location,
+                            )
+                            continue
+                        log.info(
+                            "ALERT (age: %d min, posted while stopped)  %s  %s  (%s)",
+                            minutes,
+                            listing.title,
+                            listing.price_text,
+                            listing.location,
+                        )
+                        await notifier.send(listing)
+                        # It was claimed as a silent record, so correct the row.
+                        store.set_notified(listing.id, True)
+                        alerted += 1
+                        continue
 
                     # Freshness gate: if the detail page says this listing is
                     # older than the threshold, it is not what we are racing
@@ -495,6 +517,17 @@ class WatcherRunner:
                     )
                     await notifier.send(listing)
                     alerted += 1
+
+            if silent:
+                # Both counts, because they answer different questions: how much
+                # the page holds, and how much of it was not already known.
+                log.info(
+                    "Startup — warm-up poll: %d listing(s) on the page, %d new to "
+                    "us, %d announced; the rest were already listed",
+                    len(matched),
+                    len(fresh),
+                    alerted,
+                )
 
         self.status.last_poll_at = _utc_now()
         self.status.last_error = None

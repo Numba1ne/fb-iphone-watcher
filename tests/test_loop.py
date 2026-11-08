@@ -65,11 +65,6 @@ def _capture_runner_log():
 
 
 class FakePage:
-    async def close(self) -> None:
-        return None
-
-
-class FakePage:
     """Stands in for a detail page; reports no listed age."""
 
     async def goto(self, *args: object, **kwargs: object) -> None:
@@ -179,6 +174,29 @@ async def _wait_for_polls(runner, target: int, timeout: float = 10) -> None:
                 f"state={runner.status.state} error={runner.status.last_error}"
             )
         await asyncio.sleep(0.02)
+
+
+async def _warmup_run(age_text: str, *, max_listed_minutes: int = 8):
+    """Run a fresh process's first poll with the detail page reporting `age_text`.
+
+    Returns what was sent, the runner's log messages, and the stored row.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=max_listed_minutes)
+        sent: list[Listing] = []
+        cards = [CARD_LIST[0]]
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(cards, sent)
+
+        async def fake_age(session, url):
+            return age_text
+
+        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", fake_age):
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        with Store(cfg.db_path) as store:
+            row = store.search_listings(limit=1)[0][0]
+        return sent, logs, row
 
 
 async def main() -> int:
@@ -344,6 +362,31 @@ async def main() -> int:
             and not any(m.startswith("ALERT (age: 0 min)") for m in logs),
         )
         check("unreadable age still alerts rather than silently dropping", len(sent) == 1)
+
+    # 12. The warm-up is age-checked: a listing the detail page proves was
+    # posted while the bot was down still gets announced, while yesterday's
+    # backlog and unreadable ages stay quiet.
+    sent, logs, row = await _warmup_run("3 minutes ago")
+    check("warm-up announces a listing posted while stopped", [x.id for x in sent] == ["1"])
+    check(
+        "the warm-up alert says why it was announced",
+        any("posted while stopped" in m for m in logs),
+    )
+    check("the announced warm-up row is marked as told", row["notified"] == 1)
+
+    sent, _, row = await _warmup_run("18 hours ago")
+    check("warm-up stays quiet on yesterday's listing", sent == [])
+    check("yesterday's listing is stored as untold", row["notified"] == 0)
+
+    sent, logs, _ = await _warmup_run("")
+    check("warm-up stays quiet when the age can't be read", sent == [])
+    check(
+        "the unreadable warm-up listing logs as recorded",
+        any(m.startswith("RECORDED (startup)") for m in logs),
+    )
+
+    sent, _, _ = await _warmup_run("3 minutes ago", max_listed_minutes=0)
+    check("warm-up stays quiet when the gate is disabled", sent == [])
 
     print()
     if failures:

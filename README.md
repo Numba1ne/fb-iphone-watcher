@@ -146,9 +146,10 @@ listings: a bar per recent poll (new listings, none, or failed) and the
 current search settings.
 
 The silence rule applies on every start, not just a fresh database: the first
-poll after launch records whatever is already on the page — after a night off
-that is yesterday's backlog — under **All seen**, with no alerts. Only listings
-that appear after startup are announced. "Alerts sent" counts only those.
+poll after launch is a warm-up. After a night off that page holds yesterday's
+backlog, so each newcomer's real age is read and only a listing that proves it
+was posted while the bot was down is announced. The rest are recorded under
+**All seen** with no alerts. "Alerts sent" counts only what actually went out.
 
 The dashboard and the bot are the same process — closing it stops the
 watcher, which is why the state shown is always the real state.

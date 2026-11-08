@@ -70,9 +70,12 @@ filters:
 notifications:
   telegram: true
   discord: true
-  # On the first poll after every start, record the listings already on the
-  # page without alerting on them — coming back after a night off shouldn't
-  # replay yesterday's listings. Only what appears afterwards is news.
+  # The first poll after every start is a warm-up. After a night off the page
+  # is full of yesterday's listings, and replaying them is noise. Each newcomer
+  # has its real age read anyway, so a listing posted while the bot was down is
+  # still announced; everything else is recorded silently and shown under
+  # All seen. With max_age_minutes set to 0 nothing can be proven fresh, so a
+  # warm-up announces nothing.
   first_run_silent: true
 
   # Only alert if the listing is at most this many minutes old. Defaults to 8;
