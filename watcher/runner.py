@@ -77,6 +77,12 @@ class WatcherRunner:
         self._session: BrowserSession | None = None
         self.last_result: tuple[int, int] = (0, 0)  # (parsed, alerted) from the last attempt
         self._notif_log: NotificationLog | None = None
+        # True until the first poll that actually reads listings. That poll
+        # records whatever is already on the search page without alerting: after
+        # an overnight stop the page is full of yesterday's listings, and
+        # announcing them is noise, not news. Cleared once a poll has claimed
+        # them, so a failed first poll doesn't consume the warm-up.
+        self._startup_poll = True
 
     # -------------------------------------------------------------- control
 
@@ -389,10 +395,17 @@ class WatcherRunner:
 
         alerted = 0
         with Store(cfg.db_path) as store:
-            first_run = store.is_empty
-            silent = first_run and cfg.first_run_silent
-            if first_run:
-                log.info("First run — recording %d existing listing(s) silently", len(matched))
+            # The first poll after every start is a warm-up, not just the very
+            # first run against an empty database. Anything already on the page
+            # when the bot comes up is recorded, shown on the dashboard, and
+            # never announced — only listings that appear afterwards are news.
+            silent = self._startup_poll and cfg.first_run_silent
+            if silent:
+                log.info(
+                    "Startup — recording %d existing listing(s) silently; "
+                    "alerts begin with the next poll",
+                    len(matched),
+                )
 
             # Claim first: claim() is the atomic "have we seen this?" check, so
             # it must happen before any slow work. `fresh` is the rare set of
@@ -402,6 +415,8 @@ class WatcherRunner:
                 for listing in matched
                 if store.claim(listing, now=_utc_now(), alert=not silent)
             ]
+            if matched:
+                self._startup_poll = False
 
             # Read every new listing's detail page *concurrently*. Done in
             # sequence, a poll that found nine new listings spent over a minute
@@ -427,31 +442,45 @@ class WatcherRunner:
 
             async with Notifier(cfg) as notifier:
                 for listing in fresh:
-                    minutes: int | None = None
-                    if not silent:
-                        age_text = ages.get(listing.id, "")
-                        if age_text:
-                            listing = listing.with_listed_text(age_text)
-                            store.update_listed(listing.id, age_text, listing.listed_at)
-                        minutes = age_minutes(listing.listed_text)
+                    # Warm-up: recorded and visible on the dashboard, but it was
+                    # already listed when the bot came up, so it is not news.
+                    if silent:
+                        log.info(
+                            "RECORDED (startup)  %s  %s  (%s)",
+                            listing.title,
+                            listing.price_text,
+                            listing.location,
+                        )
+                        continue
 
-                        # Freshness gate: if the detail page says this listing
-                        # is older than the threshold, it is not what we are
-                        # racing for. Record it, but stay quiet.
-                        if (
-                            cfg.max_listed_minutes > 0
-                            and minutes is not None
-                            and minutes > cfg.max_listed_minutes
-                        ):
-                            store.set_notified(listing.id, False)
-                            log.info(
-                                "SKIPPED (too old: %d min)  %s  %s  (%s)",
-                                minutes,
-                                listing.title,
-                                listing.price_text,
-                                listing.location,
-                            )
-                            continue
+                    age_text = ages.get(listing.id, "")
+                    if age_text:
+                        listing = listing.with_listed_text(age_text)
+                        store.update_listed(listing.id, age_text, listing.listed_at)
+                    # Gate on the *detail page's* wording only. Falling back to
+                    # the card's text would read its "Just listed" badge as 0
+                    # minutes, so every failed age lookup would look perfectly
+                    # fresh and alert — which is exactly how the whole backlog
+                    # got announced after an overnight stop.
+                    minutes = age_minutes(age_text)
+
+                    # Freshness gate: if the detail page says this listing is
+                    # older than the threshold, it is not what we are racing
+                    # for. Record it, but stay quiet.
+                    if (
+                        cfg.max_listed_minutes > 0
+                        and minutes is not None
+                        and minutes > cfg.max_listed_minutes
+                    ):
+                        store.set_notified(listing.id, False)
+                        log.info(
+                            "SKIPPED (too old: %d min)  %s  %s  (%s)",
+                            minutes,
+                            listing.title,
+                            listing.price_text,
+                            listing.location,
+                        )
+                        continue
 
                     log.info(
                         "ALERT (age: %s)  %s  %s  (%s)",
@@ -460,9 +489,8 @@ class WatcherRunner:
                         listing.price_text,
                         listing.location,
                     )
-                    if not silent:
-                        await notifier.send(listing)
-                        alerted += 1
+                    await notifier.send(listing)
+                    alerted += 1
 
         self.status.last_poll_at = _utc_now()
         self.status.last_error = None

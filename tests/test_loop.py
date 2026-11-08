@@ -210,9 +210,15 @@ async def main() -> int:
     # 3. A new listing alerts exactly once.
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir))
-        await run_polls(cfg, CARD_LIST)
+        sent: list[Listing] = []
+        cards = list(CARD_LIST)
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(cards, sent)
         extra = Listing.from_card("99", "iPhone 13 Pro 256GB", 320, "Bromley")
-        sent, _, _ = await run_polls(cfg, CARD_LIST + [extra])
+        with p1, p2, p3, p4:
+            await runner.poll_once()   # warm-up: records the backlog silently
+            cards.append(extra)        # a listing posted while we were running
+            await runner.poll_once()
         check("new listing alerted", [x.id for x in sent] == ["99"])
 
     # 4. first_run_silent: false alerts on the backlog.
@@ -306,6 +312,38 @@ async def main() -> int:
             "alert is logged with the listing's age",
             any(m.startswith("ALERT (age: 3 min)") for m in logs),
         )
+
+    # 10. Restarting over yesterday's database announces nothing. Every start
+    # records what is already on the page, so coming back after a night off
+    # doesn't replay the backlog.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir))
+        await run_polls(cfg, CARD_LIST)                     # first process
+        sent, _, rows = await run_polls(cfg, CARD_LIST)     # restarted process
+        check("restart does not replay the backlog", sent == [])
+        check(f"restart still records the backlog (rows={rows})", rows == 1)
+
+    # 11. A failed age lookup must never read as fresh. It used to fall back to
+    # the card's "Just listed" badge, which scored every failed lookup as 0
+    # minutes — the bug that announced 14 stale listings at once.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+
+        async def no_age(session, url):
+            return ""   # detail page timed out / wording not found
+
+        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", no_age):
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        check(
+            "unreadable age is logged as unknown, never as fresh",
+            any(m.startswith("ALERT (age: unknown)") for m in logs)
+            and not any(m.startswith("ALERT (age: 0 min)") for m in logs),
+        )
+        check("unreadable age still alerts rather than silently dropping", len(sent) == 1)
 
     print()
     if failures:

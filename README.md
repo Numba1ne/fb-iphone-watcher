@@ -145,9 +145,10 @@ the top right, so you can restart without touching a terminal. Below the
 listings: a bar per recent poll (new listings, none, or failed) and the
 current search settings.
 
-The first-run silence rule still applies: on a fresh database the listings
-appear under **All seen** but you receive no alerts until something genuinely
-new arrives. "Alerts sent" counts only those.
+The silence rule applies on every start, not just a fresh database: the first
+poll after launch records whatever is already on the page — after a night off
+that is yesterday's backlog — under **All seen**, with no alerts. Only listings
+that appear after startup are announced. "Alerts sent" counts only those.
 
 The dashboard and the bot are the same process — closing it stops the
 watcher, which is why the state shown is always the real state.
@@ -179,7 +180,7 @@ nothing outside this machine can connect.
 | `notifications.alert_from_probe` | `false` | Alert straight from a saved-search notification |
 | `filters.require_any` | `["iphone"]` | Title must contain one |
 | `filters.exclude` | parts/cracked/locked… | Title containing any is dropped |
-| `notifications.first_run_silent` | `true` | Record existing listings without alerting |
+| `notifications.first_run_silent` | `true` | Record the backlog silently on every start, not just a fresh database |
 | `browser.headless` | `true` | `false` to watch it work |
 
 **How fresh you can actually get:** the interval is only half the story. A

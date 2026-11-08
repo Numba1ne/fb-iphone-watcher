@@ -70,7 +70,9 @@ filters:
 notifications:
   telegram: true
   discord: true
-  # On the very first run, record existing listings without alerting on them.
+  # On the first poll after every start, record the listings already on the
+  # page without alerting on them — coming back after a night off shouldn't
+  # replay yesterday's listings. Only what appears afterwards is news.
   first_run_silent: true
 
   # Only alert if the listing is at most this many minutes old. Defaults to 8;
