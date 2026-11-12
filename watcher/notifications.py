@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .browser import BrowserSession
 
@@ -59,6 +61,22 @@ _EXTRACT_JS = """
 """
 
 
+# Any notification row at all, or a listing link: evidence the list rendered.
+# Counted separately from the extractor's own match so "no saved-search alert"
+# can be told apart from "the page never rendered".
+_READY_JS = """
+() => ({
+    rows: document.querySelectorAll('[role="listitem"], [role="row"], [role="article"]').length,
+    items: document.querySelectorAll('a[href*="/marketplace/item/"]').length,
+})
+"""
+
+# The list is rendered client-side after the shell arrives; this bounds how
+# long we wait for it rather than trusting one fixed sleep.
+_READY_TIMEOUT_S = 20.0
+_READY_POLL_MS = 500
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -87,6 +105,38 @@ async def _read_rows(page: Page) -> list[dict]:
         return []
 
 
+async def _open_notifications(page: Page) -> dict:
+    """Navigate to the notifications page and wait for the list to render.
+
+    Returns the last readiness counts seen ({rows, items}).
+
+    `domcontentloaded` is the wrong wait here: Facebook's app shell regularly
+    takes longer than the whole navigation timeout to fire it, so Playwright
+    raised and the caller threw away a page whose notifications were already
+    in the DOM — which is how the probe came to report "0 listing(s) visible"
+    on every single poll. `commit` is all we actually need; readiness is then
+    polled for directly.
+    """
+    try:
+        await page.goto(NOTIFICATIONS_URL, wait_until="commit")
+    except PlaywrightTimeoutError:
+        # The response started but never settled. The DOM after a partial load
+        # is still worth reading, so this is not fatal.
+        log.debug("Notifications navigation did not settle; reading what arrived")
+
+    counts: dict = {}
+    deadline = time.monotonic() + _READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            counts = await page.evaluate(_READY_JS) or {}
+        except Exception:  # noqa: BLE001 - mid-navigation the page can be blank
+            counts = {}
+        if counts.get("rows") or counts.get("items"):
+            break
+        await page.wait_for_timeout(_READY_POLL_MS)
+    return counts
+
+
 async def fetch_alert_items(session: BrowserSession) -> list[dict]:
     """Return the Marketplace listings currently visible in notifications.
 
@@ -96,10 +146,8 @@ async def fetch_alert_items(session: BrowserSession) -> list[dict]:
     """
     page = await session.new_page()
     try:
-        await page.goto(NOTIFICATIONS_URL, wait_until="domcontentloaded")
+        counts = await _open_notifications(page)
         await session.assert_logged_in(page)
-        # The list is rendered client-side after the shell loads.
-        await page.wait_for_timeout(4000)
         rows = await _read_rows(page)
     except Exception as exc:  # noqa: BLE001
         log.warning("Notification probe failed: %s", exc)
@@ -114,6 +162,23 @@ async def fetch_alert_items(session: BrowserSession) -> list[dict]:
             continue
         text = re.sub(r"\s+", " ", str(row.get("text") or "")).strip()
         items.append({"id": item_id, "text": text, "age_text": _parse_age(text)})
+
+    if not items:
+        # The two zeroes mean opposite things: a page full of ordinary
+        # notifications and no Marketplace alert is a saved search that is not
+        # firing, while an empty page means the read itself is broken. Say
+        # which one this was, so the next reader is not left guessing.
+        if counts.get("rows"):
+            log.info(
+                "Notification probe: page rendered %d notification(s), none of "
+                "them a Marketplace saved-search alert",
+                counts["rows"],
+            )
+        else:
+            log.warning(
+                "Notification probe: notifications page rendered no rows at all "
+                "— no alerts, or the read is not reaching the list"
+            )
     return items
 
 

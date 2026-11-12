@@ -23,8 +23,14 @@ from pathlib import Path
 
 from . import filters
 from .browser import BrowserSession, SessionExpired
-from .marketplace import dump_debug, fetch_listed_age, open_search, parse_cards
-from .models import AppConfig, Listing, age_minutes
+from .marketplace import (
+    dump_debug,
+    open_search,
+    parse_cards,
+    read_creation_times,
+    stamp_created,
+)
+from .models import AppConfig, Listing
 from .notifications import NotificationLog, fetch_alert_items
 from .notify import Notifier
 from .store import Store
@@ -333,13 +339,54 @@ class WatcherRunner:
                 searches.append(("secondary", alt))
         return searches
 
-    async def _fetch_cards(self, label: str, url: str) -> list[Listing]:
-        """Load one search in its own fresh page and parse it."""
+    async def _fetch_cards(
+        self, label: str, url: str
+    ) -> tuple[list[Listing], int | None]:
+        """Load one search in its own fresh page and parse it.
+
+        Returns the cards and Facebook's own `server_time` if the page carried
+        one, so the freshness gate can measure against Facebook's clock rather
+        than this machine's. None means no card could be dated.
+        """
         assert self._session is not None
         cfg = self.cfg
+        render_started = time.monotonic()
         page = await open_search(self._session, cfg, url=url)
         try:
             cards, unparsed = await parse_cards(page, cfg.max_cards)
+            # The page's JSON carries each card's exact posting moment, so the
+            # age comes with the card and no listing is opened a second time.
+            posted, server_time = await read_creation_times(page)
+            # How long the page took to render and read. The gate counts those
+            # seconds too, so a slow page cannot make its listings look newer
+            # than they are.
+            render_delay = time.monotonic() - render_started
+            if render_delay >= 60:
+                log.warning(
+                    "%s search: page took %.0fs to render and read; its "
+                    "timestamps are dated that much before the poll",
+                    label,
+                    render_delay,
+                )
+            age_clock: int | None = None
+            read_at: float | None = None
+            if cards and posted:
+                # Facebook's own clock dates the listing, so it dates the age:
+                # the stamps are read the moment the page renders, which is
+                # `server_time`. A page without one dates on the local clock,
+                # so a skew shows up as a plainly wrong age in the log rather
+                # than passing unremarked.
+                age_clock = server_time or int(time.time())
+                cards = stamp_created(cards, posted, age_clock)
+                read_at = time.monotonic() - render_delay
+            elif cards:
+                # Ages drive the freshness gate, so losing them silently would
+                # stop every alert while the log still looked healthy.
+                log.warning(
+                    "%s search: page carried no listing timestamps — ages "
+                    "unknown, so nothing can be proven fresh",
+                    label,
+                )
             # --debug keeps an HTML/screenshot of every empty or partial parse.
             # Without it, a dump is only written on a fully empty poll, so a
             # months-long run doesn't fill the disk with pages.
@@ -347,7 +394,7 @@ class WatcherRunner:
                 await dump_debug(page, cfg.debug_dir, f"no-cards-{label}")
             if unparsed:
                 log.warning("%s search: %d card(s) could not be parsed", label, unparsed)
-            return cards
+            return cards, read_at
         finally:
             await page.close()
 
@@ -369,14 +416,31 @@ class WatcherRunner:
         cards: list[Listing] = []
         seen: set[str] = set()
         errors: list[str] = []
+        # The monotonic moment the page's timestamps were read. The gate ages
+        # each listing from this moment, so the seconds spent claiming and
+        # deciding still count — a listing must never get younger while it
+        # waits to be judged.
+        read_wall: float | None = None
         for (label, _url), result in zip(searches, results):
             if isinstance(result, BaseException):
                 errors.append(f"{label}: {result}")
                 continue
-            for card in result:
-                if card.id not in seen:
-                    seen.add(card.id)
-                    cards.append(card)
+            found, read_at = result
+            # Earliest wins: the cards were stamped against whichever page
+            # reached us first, and counting from a later moment would make
+            # them younger than their stamps.
+            if read_at is not None and (read_wall is None or read_at < read_wall):
+                read_wall = read_at
+            for card in found:
+                if card.id in seen:
+                    continue
+                seen.add(card.id)
+                # A card without a timestamp is only as good as the clock the
+                # page carries; anchor it there so the gate below never has to
+                # fall back to this machine's clock.
+                cards.append(
+                    card if read_at is None else card.with_created_clock(int(read_at))
+                )
 
         if errors:
             for err in errors:
@@ -415,32 +479,12 @@ class WatcherRunner:
             if matched:
                 self._startup_poll = False
 
-            # Read every new listing's detail page *concurrently*. Done in
-            # sequence, a poll that found nine new listings spent over a minute
-            # just on age lookups — which is exactly the latency this bot is
-            # trying to avoid. The semaphore keeps the burst from looking like
-            # a flood to Facebook.
+            # Ages arrive with the cards themselves (see _fetch_cards), so a
+            # poll that finds nine new listings no longer opens nine detail
+            # pages to date them. That fan-out was the largest remaining cost
+            # per poll, and the extra page loads were the likeliest reason
+            # Facebook started resetting connections.
             #
-            # The warm-up poll reads them too: mostly that is yesterday's
-            # backlog, but one entry may have been posted while the bot was
-            # down, and its real age is the only thing that tells them apart.
-            ages: dict[str, str] = {}
-            if fresh:
-                gate = asyncio.Semaphore(4)
-
-                async def _age(listing: Listing) -> tuple[str, str]:
-                    async with gate:
-                        return listing.id, await fetch_listed_age(
-                            self._session, listing.url
-                        )
-
-                results = await asyncio.gather(
-                    *(_age(item) for item in fresh), return_exceptions=True
-                )
-                for item in results:
-                    if isinstance(item, tuple):
-                        ages[item[0]] = item[1]
-
             def _proven_fresh(minutes: int | None) -> bool:
                 """Only an age we actually read can prove a listing is fresh.
 
@@ -456,16 +500,21 @@ class WatcherRunner:
 
             async with Notifier(cfg) as notifier:
                 for listing in fresh:
-                    age_text = ages.get(listing.id, "")
-                    if age_text:
-                        listing = listing.with_listed_text(age_text)
-                        store.update_listed(listing.id, age_text, listing.listed_at)
-                    # Gate on the *detail page's* wording only. Falling back to
-                    # the card's text would read its "Just listed" badge as 0
-                    # minutes, so every failed age lookup would look perfectly
-                    # fresh and alert — which is exactly how the whole backlog
-                    # got announced after an overnight stop.
-                    minutes = age_minutes(age_text)
+                    # The card's own timestamp when the page carried one; only
+                    # a card without one falls back to its badge wording, and a
+                    # card with neither reads as unproven rather than as new —
+                    # that distinction is what stopped an overnight backlog
+                    # being announced on restart. The age is read against the
+                    # clock the page itself was dated by — advanced to now, so
+                    # the seconds spent parsing and claiming still count — and
+                    # never against this machine's clock, which is not the one
+                    # Facebook wrote the timestamps with.
+                    elapsed = (
+                        0.0
+                        if read_wall is None or listing.age_clock_epoch is None
+                        else time.monotonic() - read_wall
+                    )
+                    minutes = listing.aged_now(max(0.0, elapsed)).minutes_old()
 
                     if silent:
                         # Warm-up: announce only what the detail page proves was

@@ -46,10 +46,14 @@ _LISTED_BADGE = re.compile(
 )
 # The detail page states the real age ("Listed 41 minutes ago in Sunderland"),
 # unlike the card, which badges everything "Just listed".
-_LISTED_DETAIL = re.compile(
-    r"Listed\s+(just now|today|yesterday|\d+\s*(?:second|minute|hour|day|week)s?\s+ago)",
-    re.IGNORECASE,
-)
+# Every listing the page renders also carries its exact posting moment in the
+# JSON that draws the card: ...,"id":"1156701640250336"},"creation_time":1794214628.
+# This is the card's own data, so it costs no extra request, and it beats the
+# detail page's wording, which is only accurate to the hour.
+_CREATION_TIME = re.compile(r'"id":"(\d{6,})"\},"creation_time":(\d{10})')
+# Facebook's clock as it rendered the page. Used to warn about a skewed local
+# clock, which would otherwise silently mis-judge every age.
+_SERVER_TIME = re.compile(r'"server_time":(\d{10})')
 
 
 def _bust_cache(url: str) -> str:
@@ -265,29 +269,35 @@ async def parse_cards(page: Page, limit: int) -> tuple[list[Listing], int]:
     return listings, unparsed
 
 
-async def fetch_listed_age(session: BrowserSession, url: str) -> str:
-    """Read a listing's real "Listed X ago" wording from its detail page.
+def parse_creation_times(html: str) -> tuple[dict[str, int], int | None]:
+    """Map each listing id on the page to its exact posting epoch.
 
-    The search card badges everything "Just listed", so the card alone cannot
-    tell you how old a listing is. Only worth doing for listings we are about
-    to alert on — it costs one extra page load.
+    Returns (id -> epoch seconds, Facebook's server time or None). A listing
+    missing from the map is one whose timestamp the page did not carry; the
+    caller must treat that as "age unknown", never as "brand new".
     """
-    page = await session.new_page()
-    try:
-        await page.goto(url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2500)
-        text = await page.inner_text("body")
-    except Exception as exc:  # noqa: BLE001 - a missing age must not block the alert
-        log.warning("Could not read listed age for %s: %s", url, exc)
-        return ""
-    finally:
-        await page.close()
+    posted = {str(item_id): int(stamp) for item_id, stamp in _CREATION_TIME.findall(html)}
+    server = _SERVER_TIME.search(html)
+    return posted, (int(server.group(1)) if server else None)
 
-    match = _LISTED_DETAIL.search(text)
-    if not match:
-        return ""
-    raw = match.group(1).lower().strip()
-    return "just now" if raw in ("just listed", "just now") else raw
+
+async def read_creation_times(page: Page) -> tuple[dict[str, int], int | None]:
+    """Read the page's own timestamps. Never raises: an age is not worth a poll."""
+    try:
+        return parse_creation_times(await page.content())
+    except Exception as exc:  # noqa: BLE001 - a missing age must not fail the poll
+        log.warning("Could not read listing timestamps from the page: %s", exc)
+        return {}, None
+
+
+def stamp_created(listings: list[Listing], posted: dict[str, int], now_epoch: int) -> list[Listing]:
+    """Attach the exact posting moment to every card that has one."""
+    return [
+        listing.with_created(posted[listing.id], now_epoch=now_epoch)
+        if listing.id in posted
+        else listing
+        for listing in listings
+    ]
 
 
 async def dump_debug(page: Page, debug_dir: str, reason: str) -> Path:

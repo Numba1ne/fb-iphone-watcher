@@ -13,6 +13,7 @@ import asyncio
 import logging
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import watcher.marketplace as marketplace_mod  # noqa: E402
 import watcher.runner as runner_mod  # noqa: E402
 from tests.test_notify import base_config  # noqa: E402
 from watcher.models import Listing  # noqa: E402
@@ -65,7 +67,10 @@ def _capture_runner_log():
 
 
 class FakePage:
-    """Stands in for a detail page; reports no listed age."""
+    """Stands in for a search page; its content is never read."""
+
+    async def content(self) -> str:
+        return "<html></html>"
 
     async def goto(self, *args: object, **kwargs: object) -> None:
         return None
@@ -108,13 +113,52 @@ def make_cfg(tmp: Path, **overrides: object):
     return replace(cfg, **overrides) if overrides else cfg
 
 
-def _patches(cards, sent):
+def _ages_for(cards, ages, now):
+    """Turn a test's shorthand into the page's id -> epoch map.
+
+    `ages` is either a dict of id -> minutes, or a `minutes()` call producing
+    the seconds applied to every card, or None for "the page carried no
+    timestamps at all" — the case that must read as an unknown age rather than
+    as brand new.
+    """
+    if ages is None:
+        return {}
+    if isinstance(ages, dict):
+        return {
+            cid: now - int(minutes) * 60
+            for cid, minutes in ages.items()
+            if any(c.id == cid for c in cards)
+        }
+    if callable(ages):
+        ages = ages()
+    # Seconds as well as minutes: a test needs to land a stamp just short of
+    # an age boundary to see which side the gate rounds to.
+    return {c.id: now - int(ages) for c in cards}
+
+
+def minutes(count: float) -> int:
+    """A card `count` minutes old."""
+    return int(count * 60)
+
+
+def _patches(cards, sent, ages=minutes(2), *, server_skew=0, render_lag=0.0):
+    """Patch the scrape away."""
     async def fake_open(session, cfg, url=None):
+        # `render_lag` is how many seconds the page takes to arrive, which
+        # the gate counts as age: a listing is older by that much.
+        if render_lag:
+            await asyncio.sleep(render_lag)
         return FakePage()
 
     async def fake_parse(page, limit):
         # Fresh objects each poll, like a real scrape.
         return [Listing.from_card(c.id, c.title, c.price, c.location) for c in cards], 0
+
+    async def fake_times(page):
+        # `server_skew` is how far Facebook's clock runs from this machine's.
+        server = int(time.time()) + server_skew
+        posted = _ages_for(cards, ages, server)
+        return posted, (server if posted else None)
 
     from watcher.notify import Notifier
 
@@ -126,11 +170,17 @@ def _patches(cards, sent):
         patch.object(runner_mod, "BrowserSession", lambda cfg: FakeSession()),
         patch.object(runner_mod, "open_search", fake_open),
         patch.object(runner_mod, "parse_cards", fake_parse),
+        # The page's own timestamps are the only source of an age now, so this
+        # is where a test says how old its cards are. Patched in the
+        # marketplace module too: the runner imports it by name, so the stub
+        # above can be shadowed by whichever reference is live at call time.
+        patch.object(marketplace_mod, "read_creation_times", fake_times),
+        patch.object(runner_mod, "read_creation_times", fake_times),
         patch.object(Notifier, "send", capture),
     )
 
 
-async def run_polls(cfg, cards, *, polls=1):
+async def run_polls(cfg, cards, *, polls=1, ages=minutes(2)):
     """Poll `polls` times with scraping replaced by `cards`, then return state.
 
     Uses poll_once (synchronous, deterministic) rather than the background
@@ -138,8 +188,8 @@ async def run_polls(cfg, cards, *, polls=1):
     """
     sent: list[Listing] = []
     runner = WatcherRunner(cfg)
-    p1, p2, p3, p4 = _patches(cards, sent)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5, p6 = _patches(cards, sent, ages)
+    with p1, p2, p3, p4, p5, p6:
         for _ in range(polls):
             await runner.poll_once()
 
@@ -152,8 +202,8 @@ async def run_loop_mode(cfg, cards):
     """Exercise the background loop specifically, since that's the dashboard path."""
     sent: list[Listing] = []
     runner = WatcherRunner(cfg)
-    p1, p2, p3, p4 = _patches(cards, sent)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5, p6 = _patches(cards, sent)
+    with p1, p2, p3, p4, p5, p6:
         await runner.start()
         await _wait_for_polls(runner, 1)
         await runner.stop()
@@ -176,22 +226,20 @@ async def _wait_for_polls(runner, target: int, timeout: float = 10) -> None:
         await asyncio.sleep(0.02)
 
 
-async def _warmup_run(age_text: str, *, max_listed_minutes: int = 8):
-    """Run a fresh process's first poll with the detail page reporting `age_text`.
+async def _warmup_run(age: int | None, *, max_listed_minutes: int = 8):
+    """Run a fresh process's first poll with its card this many seconds old.
 
-    Returns what was sent, the runner's log messages, and the stored row.
+    `age=None` means the page carried no timestamp, so the age is unknowable.
+    Returns what was sent, the log messages, and the stored row.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir), max_listed_minutes=max_listed_minutes)
         sent: list[Listing] = []
         cards = [CARD_LIST[0]]
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(cards, sent)
+        p1, p2, p3, p4, p5, p6 = _patches(cards, sent, age)
 
-        async def fake_age(session, url):
-            return age_text
-
-        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", fake_age):
+        with p1, p2, p3, p4, p5, p6:
             with _capture_runner_log() as logs:
                 await runner.poll_once()
         with Store(cfg.db_path) as store:
@@ -207,10 +255,12 @@ async def main() -> int:
         if not condition:
             failures.append(label)
 
-    # 1. First run: records matching listings, sends nothing.
+    # 1. First run over an existing backlog: records matching listings, sends
+    # nothing. The cards are given ages older than the gate, because a warm-up
+    # listing *younger* than it is announced on purpose (see case 12).
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir))
-        sent, status, rows = await run_polls(cfg, CARD_LIST)
+        sent, status, rows = await run_polls(cfg, CARD_LIST, ages=minutes(60))
         check("first run sends no notifications", sent == [])
         check(f"first run stores only matches (rows={rows})", rows == 1)
         check("poll recorded in history", status.poll_count == 1)
@@ -231,9 +281,12 @@ async def main() -> int:
         sent: list[Listing] = []
         cards = list(CARD_LIST)
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(cards, sent)
+        # The backlog is old; the listing that appears mid-run is new.
+        ages = {c.id: 60 for c in CARD_LIST}
+        ages["99"] = 2
+        p1, p2, p3, p4, p5, p6 = _patches(cards, sent, ages)
         extra = Listing.from_card("99", "iPhone 13 Pro 256GB", 320, "Bromley")
-        with p1, p2, p3, p4:
+        with p1, p2, p3, p4, p5, p6:
             await runner.poll_once()   # warm-up: records the backlog silently
             cards.append(extra)        # a listing posted while we were running
             await runner.poll_once()
@@ -275,8 +328,8 @@ async def main() -> int:
         sent: list[Listing] = []
         runner = WatcherRunner(cfg)
         FakeSession.restarts = 0
-        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
-        with p1, p2, p3, p4:
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST, sent)
+        with p1, p2, p3, p4, p5, p6:
             await runner.start()
             await _wait_for_polls(runner, 1)
             runner.trigger_poll()  # skip the interval so the test stays fast
@@ -287,18 +340,15 @@ async def main() -> int:
             FakeSession.restarts >= 1,
         )
 
-    # 8. Freshness gate: a listing the detail page says is old is recorded but
-    # never alerted, and its row is corrected back to notified=0.
+    # 8. Freshness gate: a listing the page's timestamp says is old is recorded
+    # but never alerted, and its row stays notified=0.
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
         sent: list[Listing] = []
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST, sent, ages=minutes(20))
 
-        async def old_age(session, url):
-            return "20 minutes ago"
-
-        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", old_age):
+        with p1, p2, p3, p4, p5, p6:
             with _capture_runner_log() as logs:
                 await runner.poll_once()
         check("stale listing not alerted", sent == [])
@@ -317,12 +367,9 @@ async def main() -> int:
         cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
         sent: list[Listing] = []
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST, sent, ages=minutes(3))
 
-        async def fresh_age(session, url):
-            return "3 minutes ago"
-
-        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", fresh_age):
+        with p1, p2, p3, p4, p5, p6:
             with _capture_runner_log() as logs:
                 await runner.poll_once()
         check("fresh listing alerted", [x.id for x in sent] == ["1"])
@@ -344,19 +391,16 @@ async def main() -> int:
         check("restart does not replay the backlog", sent == [])
         check(f"restart still records the backlog (rows={rows})", rows == 1)
 
-    # 11. A failed age lookup must never read as fresh. It used to fall back to
+    # 11. A missing timestamp must never read as fresh. It used to fall back to
     # the card's "Just listed" badge, which scored every failed lookup as 0
     # minutes — the bug that announced 14 stale listings at once.
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
         sent: list[Listing] = []
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(CARD_LIST, sent)
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST, sent, ages=None)
 
-        async def no_age(session, url):
-            return ""   # detail page timed out / wording not found
-
-        with p1, p2, p3, p4, patch.object(runner_mod, "fetch_listed_age", no_age):
+        with p1, p2, p3, p4, p5, p6:
             with _capture_runner_log() as logs:
                 await runner.poll_once()
         check(
@@ -366,10 +410,10 @@ async def main() -> int:
         )
         check("unreadable age still alerts rather than silently dropping", len(sent) == 1)
 
-    # 12. The warm-up is age-checked: a listing the detail page proves was
+    # 12. The warm-up is age-checked: a listing whose timestamp proves it was
     # posted while the bot was down still gets announced, while yesterday's
     # backlog and unreadable ages stay quiet.
-    sent, logs, row = await _warmup_run("3 minutes ago")
+    sent, logs, row = await _warmup_run(minutes(3))
     check("warm-up announces a listing posted while stopped", [x.id for x in sent] == ["1"])
     check(
         "the warm-up alert says why it was announced",
@@ -377,18 +421,18 @@ async def main() -> int:
     )
     check("the announced warm-up row is marked as told", row["notified"] == 1)
 
-    sent, _, row = await _warmup_run("18 hours ago")
+    sent, _, row = await _warmup_run(minutes(18))
     check("warm-up stays quiet on yesterday's listing", sent == [])
     check("yesterday's listing is stored as untold", row["notified"] == 0)
 
-    sent, logs, _ = await _warmup_run("")
+    sent, logs, _ = await _warmup_run(None)
     check("warm-up stays quiet when the age can't be read", sent == [])
     check(
         "the unreadable warm-up listing logs as recorded",
         any(m.startswith("RECORDED (startup)") for m in logs),
     )
 
-    sent, _, _ = await _warmup_run("3 minutes ago", max_listed_minutes=0)
+    sent, _, _ = await _warmup_run(minutes(3), max_listed_minutes=0)
     check("warm-up stays quiet when the gate is disabled", sent == [])
 
     # 13. A delivery that fails is not recorded as an alert. The dashboard's
@@ -396,23 +440,64 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
         runner = WatcherRunner(cfg)
-        p1, p2, p3, p4 = _patches(CARD_LIST, [])
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST, [], ages=minutes(2))
         from watcher.notify import Notifier
 
         async def failing_send(self, listing):
             return False
 
-        async def fresh_age(session, url):
-            return "2 minutes ago"
-
-        with p1, p2, p3, p4, patch.object(
-            Notifier, "send", failing_send
-        ), patch.object(runner_mod, "fetch_listed_age", fresh_age):
+        with p1, p2, p3, p4, p5, p6, patch.object(Notifier, "send", failing_send):
             await runner.poll_once()
         with Store(cfg.db_path) as store:
             row = store.search_listings(limit=1)[0][0]
         check("a failed send leaves the row untold", row["notified"] == 0)
         check("a failed send is not counted as an alert", runner.last_result[1] == 0)
+
+    # 14. Ages are measured against Facebook's clock, not this machine's. The
+    # page's `server_time` is the moment it was rendered, so a machine ten
+    # minutes behind Facebook must not make 3-minute-old listings look brand
+    # new — every alert's age has to be counted from Facebook's clock.
+    only_one = CARD_LIST[:1]   # the one card that passes the filters
+    for skew, label in ((-600, "behind"), (600, "ahead of")):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+            sent: list[Listing] = []
+            runner = WatcherRunner(cfg)
+            p1, p2, p3, p4, p5, p6 = _patches(
+                only_one, sent, ages=minutes(3), server_skew=skew
+            )
+
+            with p1, p2, p3, p4, p5, p6:
+                with _capture_runner_log() as logs:
+                    await runner.poll_once()
+            check(
+                f"ages are read on Facebook's clock with this clock {skew // 60:+d} "
+                f"min {label}",
+                [x.id for x in sent] == ["1"]
+                and any(m.startswith("ALERT (age: 3 min)") for m in logs),
+            )
+
+    # 15. Time spent between the page being rendered and the listing being
+    # judged counts as age. `server_time` dates the render, so a page that took
+    # a moment and a half to arrive holds listings that much older than their
+    # stamps alone suggest — the age must round up, never down.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        # 7 minutes on the stamp plus 1.2s of render is still 7 whole minutes;
+        # 59.9 minutes plus 1.2s crosses into the eighth.
+        p1, p2, p3, p4, p5, p6 = _patches(
+            CARD_LIST[:1], sent, ages=minutes(7) + 59, render_lag=1.2
+        )
+
+        with p1, p2, p3, p4, p5, p6:
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        check(
+            "the render wait is counted, so the age is never understated",
+            any(m.startswith("ALERT (age: 8 min)") for m in logs),
+        )
 
     print()
     if failures:

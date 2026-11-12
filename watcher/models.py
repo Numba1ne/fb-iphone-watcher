@@ -18,6 +18,29 @@ _UNIT_SECONDS = {
 }
 
 
+def _wording_for_age(seconds: int) -> str:
+    """Phrase an exact age the way Facebook's own wording does.
+
+    Used when the page hands us a real timestamp, so a listing carries the same
+    vocabulary as before ("just now", "8 minutes ago") but with the accuracy of
+    an epoch instead of a rounded badge.
+    """
+    seconds = max(0, int(seconds))
+    for limit, unit, size in (
+        (60, "second", 1),
+        (3600, "minute", 60),
+        (86400, "hour", 3600),
+        (604800, "day", 86400),
+        (float("inf"), "week", 604800),
+    ):
+        if seconds < limit:
+            count = seconds // size
+            if count <= 0:
+                return "just now"
+            return f"{count} {unit}{'' if count == 1 else 's'} ago"
+    return "just now"  # pragma: no cover - the last branch always returns
+
+
 def _estimate_listed_at(listed_text: str, now: datetime) -> str | None:
     """Turn Facebook's relative wording into an absolute UTC timestamp.
 
@@ -81,6 +104,15 @@ class Listing:
     listed_text: str = ""
     # The same moment expressed absolutely, estimated at scrape time.
     listed_at: str | None = None
+    # The exact moment Facebook says it was posted, in epoch seconds. Read from
+    # the search page's own JSON, so it is precise to the second rather than to
+    # the badge's wording. None when the page carried no timestamp for this id.
+    posted_epoch: int | None = None
+    # The clock the page was aged against, in epoch seconds — Facebook's
+    # `server_time`, advanced by however long the page took to reach us. Set
+    # whenever the page carried its own clock, so a listing's age is measured
+    # the same way from the moment it was scraped to the moment it is gated.
+    age_clock_epoch: int | None = None
 
     @classmethod
     def from_card(
@@ -114,18 +146,71 @@ class Listing:
         """Human wording for alerts and the dashboard."""
         return self.listed_text or "unknown"
 
-    def with_listed_text(self, listed_text: str, now: datetime | None = None) -> "Listing":
-        """Return a copy carrying a more accurate listed time.
+    def with_created(self, posted_epoch: int, *, now_epoch: int) -> "Listing":
+        """Return a copy carrying the exact moment Facebook posted it.
 
-        The search card only ever says "Just listed"; the detail page carries
-        the real age, so this is how a card gets corrected after the fact.
+        This supersedes both the card's "Just listed" badge and any wording
+        read from a detail page: the timestamp comes from the same payload that
+        draws the card, so it costs no extra request and is precise to a second.
         """
-        moment = now or datetime.now(timezone.utc)
+        posted = int(posted_epoch)
         return replace(
             self,
-            listed_text=listed_text,
-            listed_at=_estimate_listed_at(listed_text, moment),
+            posted_epoch=posted,
+            age_clock_epoch=int(now_epoch),
+            listed_text=_wording_for_age(now_epoch - posted),
+            listed_at=datetime.fromtimestamp(posted, timezone.utc).isoformat(
+                timespec="seconds"
+            ),
         )
+
+    def aged_now(self, elapsed: float = 0.0) -> "Listing":
+        """Advance the listing's age clock by the time since it was stamped.
+
+        A stamp is only the moment the page was dated; the poll then spends
+        further seconds parsing, claiming and deciding. Those count, so this
+        adds them — `elapsed` is the time since the page was read. Adding the
+        gap rather than writing this machine's clock keeps the one thing that
+        matters: no clock skew, at any size, moves a listing across the gate.
+        """
+        if self.age_clock_epoch is None:
+            return self
+        return replace(self, age_clock_epoch=self.age_clock_epoch + int(elapsed))
+
+    def with_created_clock(self, epoch: int) -> "Listing":
+        """Anchor a listing's badge wording to a page's own clock.
+
+        Only for a card the page carried no timestamp for: `epoch` is
+        Facebook's `server_time`, so the wording ("2 hours ago") is read
+        against the same clock that wrote it rather than this machine's. A
+        card that has a timestamp already has its clock, and is left alone —
+        re-anchoring it would replace Facebook's clock with this machine's.
+        """
+        if self.age_clock_epoch is not None:
+            return self
+        moment = datetime.fromtimestamp(int(epoch), timezone.utc)
+        return replace(
+            self,
+            listed_at=_estimate_listed_at(self.listed_text, moment)
+            if self.listed_text
+            else None,
+            age_clock_epoch=int(epoch),
+        )
+
+    def minutes_old(self, *, now_epoch: int | None = None) -> int | None:
+        """Age in whole minutes, preferring the exact timestamp.
+
+        Falls back to the wording only when the page gave no timestamp, and to
+        None when there is neither — an age we cannot read must never be
+        mistaken for "brand new".
+        """
+        if self.posted_epoch is not None:
+            # `now_epoch` when given: the caller knows how long the page took
+            # to reach it. Otherwise the moment the page was rendered, which
+            # is the same thing minus that delay.
+            now = self.age_clock_epoch if now_epoch is None else now_epoch
+            return max(0, int(now) - self.posted_epoch) // 60
+        return age_minutes(self.listed_text)
 
 
 @dataclass(frozen=True)

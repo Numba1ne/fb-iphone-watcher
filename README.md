@@ -178,6 +178,8 @@ nothing outside this machine can connect.
 | `notifications.max_age_minutes` | `8` | Alert only if the listing is this fresh; `0` disables |
 | `freshness.second_search` | `true` | Also poll a wider/no-ceiling variant and merge |
 | `freshness.second_search_radius_km` | `40` | Radius for the secondary search |
+| `notifications.probe` | `false` | Read the notifications page each `probe_every` polls, to measure whether saved-search push beats the poll |
+| `notifications.probe_every` | `2` | Polls between probes; 2 is ~1 minute at the default interval |
 | `notifications.alert_from_probe` | `false` | Alert straight from a saved-search notification |
 | `filters.require_any` | `["iphone"]` | Title must contain one |
 | `filters.exclude` | parts/cracked/locked… | Title containing any is dropped |
@@ -187,17 +189,22 @@ nothing outside this machine can connect.
 **How fresh you can actually get:** the interval is only half the story. A
 poll cannot start before the previous one finished, so if a page load plus
 parse takes longer than `interval_seconds`, the real cadence is the poll
-duration. Two things keep that small: each card is parsed in a single
-evaluation rather than a round-trip per field, and the browser is restarted
-every `restart_browser_every` polls so it never accumulates state. Watch the
-`HEARTBEAT` lines in the log to see the true cadence.
+duration. Three things keep that small: each card is parsed in a single
+evaluation rather than a round-trip per field, ages come from the search page
+itself rather than a second page load per new listing, and the browser is
+restarted every `restart_browser_every` polls so it never accumulates state.
+Watch the `HEARTBEAT` lines in the log to see the true cadence.
 
-The freshness gate is what turns "new to us" into "actually new". The
-search card badges every listing "Just listed", so when a listing is new the
-bot opens its detail page once to read the real age, and stays quiet unless
-it is within `notifications.max_age_minutes` (default 8; `0` or `null` turns
-the gate off). An older config may still say `freshness.max_listed_minutes`;
-that spelling is honoured too. Coarse wording — "today", "yesterday" — counts
+The freshness gate is what turns "new to us" into "actually new". The card's
+"Just listed" badge says nothing useful, but the same page carries each
+listing's exact posting time in the JSON that draws it (`creation_time`, to
+the second). The bot reads that while parsing the page, so dating a listing
+costs no extra request, and stays quiet unless it is within
+`notifications.max_age_minutes` (default 8; `0` or `null` turns the gate off).
+An older config may still say `freshness.max_listed_minutes`; that spelling is
+honoured too. Ages are measured against Facebook's own `server_time`, so a
+wrong clock on this machine cannot misjudge them. A card the page gave no
+timestamp for falls back to its badge wording, and "today"/"yesterday" count
 as too old. Listings whose age genuinely cannot be read are alerted anyway
 rather than silently dropped, so a markup change fails loud, not silent.
 
@@ -283,6 +290,7 @@ For a quick session instead: `tmux new -s watcher` then `./run.sh`.
 | Discord: `404 Unknown Webhook` | Webhook deleted | Create a new one |
 | `Configuration problem: ...` at startup | Missing key, or token left in `.env.example` form | Read the message — it names the key |
 | Alerts stopped but no errors | PC slept | See *Running it continuously* |
+| Probe log says `0 listing(s) visible` forever | Either no saved-search alert has fired, or the probe cannot read the page | `python tools/probe.py` — it separates the two |
 
 Logs: `data/logs/bot.log` (rotates at 5 MB, keeps 3 files).
 Every poll logs `parsed=N new=N` — if `new` keeps being 0 and `parsed` is
@@ -301,6 +309,29 @@ listing links still contain `/marketplace/item/123456`. Fix the matching
 selector in `SELECTORS` at the top of `watcher/marketplace.py` — everything
 else is anchored to that.
 
+### Checking the saved-search probe
+
+With `notifications.probe: true` the watcher reads the Facebook notifications
+page every `probe_every` polls and records the first moment each listing shows
+up there. Two tools inspect that:
+
+```bash
+python tools/probe.py           # read the page once, and say what it found
+python tools/probe.py --dump    # same, plus the HTML and a screenshot
+python tools/notify_race.py     # notification vs poll, per listing, once both have seen it
+```
+
+`probe.py` is the diagnostic. A watchful log line is one of three things, and
+only the tool can tell them apart: the page rendered a pile of ordinary
+notifications and none of them is a Marketplace alert (the saved search simply
+has not fired), the page has Marketplace listing links the extractor is missing
+(a selector problem — compare the link shapes it prints against the regex in
+`watcher/notifications.py`), or the page came back nearly empty (a login wall or
+a stalled render).
+
+Both tools need the Facebook profile to themselves, so stop the watcher first —
+the dashboard's Stop button is enough. Chromium allows one session per profile.
+
 ---
 
 ## How it works (for when you want to change it)
@@ -317,6 +348,9 @@ else is anchored to that.
 | [watcher/filters.py](watcher/filters.py) | Price band + include/exclude keywords |
 | [watcher/store.py](watcher/store.py) | SQLite seen-listings store and poll history |
 | [watcher/notify.py](watcher/notify.py) | Telegram + Discord with retries |
+| [watcher/notifications.py](watcher/notifications.py) | Saved-search probe: reads the notifications page, records first sightings |
+| [tools/probe.py](tools/probe.py) | One-shot probe, reporting what the page held and why it matched nothing |
+| [tools/notify_race.py](tools/notify_race.py) | Compares notification arrival against the poll, per listing |
 
 ### Tests
 
@@ -327,7 +361,8 @@ python -m tests.run_all   # everything, exits non-zero on failure
 Individually: `test_logic.py` (filters, URL building, dedupe), `test_parsing.py`
 (real parser against a synthetic page), `test_notify.py` (both channels against
 a local mock server — no tokens needed), `test_loop.py` (first-run silence and
-duplicate suppression).
+duplicate suppression), `test_probe.py` (the notification probe never raises,
+waits for a slow shell, and tells an empty account apart from a failed read).
 
 ### Known trade-offs
 

@@ -18,7 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from playwright.async_api import async_playwright  # noqa: E402
 
-from watcher.marketplace import parse_cards  # noqa: E402
+from watcher.marketplace import (  # noqa: E402
+    parse_cards,
+    parse_creation_times,
+    stamp_created,
+)
+from watcher.models import Listing  # noqa: E402
 
 CARD = """
 <a href="/marketplace/item/{id}/?ref=search&tracking=abc">
@@ -106,6 +111,36 @@ async def main() -> int:
     check("real card: location is the area", real is not None and real.location == "Brighton and Hove")
     check("real card: title drops the area suffix", real is not None and real.title == "iPhone 16 Pro")
     check("real card: price parsed", real is not None and real.price == 400)
+
+    # The page's own JSON dates each card. This is the only source of an exact
+    # age now, so the shape it is read from is worth pinning down.
+    page_json = (
+        '{"node":{"image":{"id":"999"}},"id":"2164263900835174"},'
+        '"creation_time":1794216182,"__isMarketplaceListingRenderable":"x"}'
+        '{"listing_price":{"amount":"160"}}'
+        '"creation_time":1794212181,"server_time":1794217246'
+    )
+    posted, server = parse_creation_times(page_json)
+    check("a card's timestamp is read from the page", posted.get("2164263900835174") == 1794216182)
+    check("Facebook's server clock is read too", server == 1794217246)
+
+    posted, server = parse_creation_times("<html>nothing here</html>")
+    check("a page with no timestamps yields none", posted == {} and server is None)
+
+    now = 1794217246
+    fresh = Listing.from_card("2164263900835174", "iPhone 13", 160, "Newcastle").with_created(1794216182, now_epoch=now)
+    check("an exact timestamp gives an exact age", fresh.minutes_old(now_epoch=now) == 17)
+    check("the wording matches that age", fresh.listed_text == "17 minutes ago")
+    check("the absolute moment is stored", (fresh.listed_at or "").startswith("2026-11-09T"))
+
+    never = Listing.from_card("1", "iPhone", 100, "London")
+    check("a card with no timestamp has an unknown age", never.minutes_old(now_epoch=now) is None)
+    check("a future timestamp clamps to zero rather than going negative",
+          never.with_created(now + 500, now_epoch=now).minutes_old(now_epoch=now) == 0)
+
+    stamped = stamp_created([never, fresh], posted={} | {"1": now - 90}, now_epoch=now)
+    check("stamping only touches cards the page dated",
+          stamped[0].posted_epoch == now - 90 and stamped[1].posted_epoch == 1794216182)
 
     print()
     if failures:
