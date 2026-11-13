@@ -149,9 +149,9 @@ class Listing:
     def with_created(self, posted_epoch: int, *, now_epoch: int) -> "Listing":
         """Return a copy carrying the exact moment Facebook posted it.
 
-        This supersedes both the card's "Just listed" badge and any wording
-        read from a detail page: the timestamp comes from the same payload that
-        draws the card, so it costs no extra request and is precise to a second.
+        This supersedes the card's own "Just listed" badge: the timestamp comes
+        from the same payload that draws the card, so it costs no extra request
+        and is precise to a second.
         """
         posted = int(posted_epoch)
         return replace(
@@ -301,8 +301,8 @@ class AppConfig:
     # compared against the poll. Off by default — it costs an extra page load.
     notifications_probe: bool = False
     notifications_probe_every: int = 2
-    # Freshness gate: skip the alert when the detail page says the listing is
-    # older than this many minutes. 0 disables the gate.
+    # Freshness gate: skip the alert when a listing's age is older than this
+    # many minutes. 0 disables the gate.
     max_listed_minutes: int = 8
     # A second, slightly different search merged into every poll.
     second_search: bool = False

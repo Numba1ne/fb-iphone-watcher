@@ -517,7 +517,7 @@ class WatcherRunner:
                     minutes = listing.aged_now(max(0.0, elapsed)).minutes_old()
 
                     if silent:
-                        # Warm-up: announce only what the detail page proves was
+                        # Warm-up: announce only what a readable age proves was
                         # posted while the bot was down. Yesterday's listings and
                         # anything unreadable stay quiet, visible on the
                         # dashboard under All seen.
@@ -541,9 +541,9 @@ class WatcherRunner:
                             alerted += 1
                         continue
 
-                    # Freshness gate: if the detail page says this listing is
-                    # older than the threshold, it is not what we are racing
-                    # for. Record it, but stay quiet.
+                    # Freshness gate: if the listing's own age says it is older
+                    # than the threshold, it is not what we are racing for.
+                    # Record it, but stay quiet.
                     if (
                         cfg.max_listed_minutes > 0
                         and minutes is not None

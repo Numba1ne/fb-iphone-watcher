@@ -107,14 +107,6 @@ class Store:
         self._conn.commit()
         return cursor.rowcount == 1
 
-    def update_listed(self, listing_id: str, listed_text: str, listed_at: str | None) -> None:
-        """Correct a row's listed time once the detail page has been read."""
-        self._conn.execute(
-            "UPDATE listings SET listed_text = ?, listed_at = ? WHERE id = ?",
-            (listed_text, listed_at, listing_id),
-        )
-        self._conn.commit()
-
     def set_notified(self, listing_id: str, notified: bool) -> None:
         """Record whether an alert actually reached a channel.
 

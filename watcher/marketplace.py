@@ -44,12 +44,11 @@ _LISTED_BADGE = re.compile(
     r"$",
     re.IGNORECASE,
 )
-# The detail page states the real age ("Listed 41 minutes ago in Sunderland"),
-# unlike the card, which badges everything "Just listed".
-# Every listing the page renders also carries its exact posting moment in the
-# JSON that draws the card: ...,"id":"1156701640250336"},"creation_time":1794214628.
-# This is the card's own data, so it costs no extra request, and it beats the
-# detail page's wording, which is only accurate to the hour.
+# The card's badge ("Just listed") is too coarse to age, but every listing the
+# page renders carries its exact posting moment in the JSON that draws the
+# card: ...,"id":"1156701640250336"},"creation_time":1794214628.
+# This is the card's own data, so it costs no extra request and is precise to
+# the second.
 _CREATION_TIME = re.compile(r'"id":"(\d{6,})"\},"creation_time":(\d{10})')
 # Facebook's clock as it rendered the page. Used to warn about a skewed local
 # clock, which would otherwise silently mis-judge every age.
