@@ -277,6 +277,15 @@ Then `launchctl load ~/Library/LaunchAgents/com.you.fbwatcher.plist`.
 
 For a quick session instead: `tmux new -s watcher` then `./run.sh`.
 
+### A headless server
+
+An always-on Linux host — a small VPS such as a Hetzner CX22 — runs the bot
+better than a desktop, since nothing sleeps and nothing depends on a person
+being logged in. It costs one Facebook login from a datacentre IP, which is the
+part most likely to hit a checkpoint; [deploy/README.md](deploy/README.md) walks
+through it, and [deploy/fb-watcher.service](deploy/fb-watcher.service) is the
+systemd unit.
+
 ---
 
 ## When something goes wrong

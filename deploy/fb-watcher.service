@@ -1,0 +1,24 @@
+[Unit]
+Description=Facebook Marketplace iPhone watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=watcher
+Group=watcher
+WorkingDirectory=/home/watcher/fb-iphone-watcher
+# --dashboard also serves the web UI on 127.0.0.1:8765 (reach it through an SSH
+# tunnel). Drop the flag for terminal-only mode.
+ExecStart=/home/watcher/fb-iphone-watcher/.venv/bin/python main.py --dashboard
+# SIGTERM finishes the current poll and closes Chromium. The runner allows
+# itself 45s for that, so let it; only then escalate.
+TimeoutStopSec=60
+# Restart on any exit, including a clean one: the bot has no "finished" state.
+Restart=always
+# A crash loop that restarts instantly hammers a login wall. Same 30s pause the
+# run.bat / run.sh wrappers use.
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
