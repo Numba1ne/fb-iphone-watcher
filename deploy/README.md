@@ -9,6 +9,9 @@ plus an occasional notification probe.
 things in. Commands assume the repo lives at `/home/watcher/fb-iphone-watcher`;
 change that in the unit if you put it elsewhere.
 
+Running it on her own Mac instead? `setup-macos.sh` in this folder does the
+same mechanical work locally — see the Mac section at the end.
+
 ## 1. User and checkout
 
 ```bash
@@ -99,3 +102,23 @@ sudo systemctl restart fb-watcher
   of those apps installed.
 - **Account risk is real.** Scraping Marketplace breaks Facebook's terms, and a
   flagged account can be restricted; use an account you would not mind losing.
+
+## On a Mac instead
+
+A Mac at home is the safer host: the Facebook session is created on the network
+it will keep using, so there is no profile to copy and no datacentre IP to be
+suspicious of. What it costs is uptime — the Mac must stay awake.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Numba1ne/fb-iphone-watcher/freshness-gate/deploy/setup-macos.sh -o setup-macos.sh
+bash setup-macos.sh            # checks macOS 11+, installs, proves Chromium runs
+```
+
+The script stops short of `config.yaml`, `.env` and `main.py --login`, because
+all three need a person. Playwright is pinned to 1.49.1 there: it is the newest
+release whose Chromium still launches on Big Sur, and a plain
+`pip install -r requirements.txt` would pull a newer one.
+
+To keep it running, use the LaunchAgent in the main README's "Running it
+continuously" section, with `caffeinate -dimsu` ahead of the python command.
+A laptop with the lid closed needs `sudo pmset -a disablesleep 1` as well.

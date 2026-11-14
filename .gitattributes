@@ -1,0 +1,5 @@
+# Shell scripts and unit files must stay LF: a CRLF shebang is unrunnable on
+# the macOS and Linux machines that execute them. Windows' autocrlf would
+# otherwise rewrite these on checkout.
+*.sh      text eol=lf
+*.service text eol=lf
