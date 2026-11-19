@@ -89,6 +89,11 @@ class WatcherRunner:
         # announcing them is noise, not news. Cleared once a poll has claimed
         # them, so a failed first poll doesn't consume the warm-up.
         self._startup_poll = True
+        # A stamp failure is worth one HTML dump per process, not one per
+        # poll: the evidence is what makes the warning actionable, but a
+        # page that stops carrying usable stamps altogether must not fill
+        # the debug directory on every poll.
+        self._stamp_failure_dumped = False
 
     # -------------------------------------------------------------- control
 
@@ -378,14 +383,36 @@ class WatcherRunner:
                 # than passing unremarked.
                 age_clock = server_time or int(time.time())
                 cards = stamp_created(cards, posted, age_clock)
+                # Having *some* stamps is not enough. The bug this guards
+                # against had a page full of stamps keyed by the listing's
+                # photo id: every card missed, ages fell back to the card's
+                # "Just listed" badge, and hour-old listings all scored 0
+                # minutes and went out in one batch. Nothing in the log
+                # breathed a word about it.
+                dated = sum(1 for card in cards if card.posted_epoch is not None)
+                if not dated:
+                    log.warning(
+                        "%s search: %d timestamp(s) on the page, but none "
+                        "matched any of the %d listing(s) parsed - ages "
+                        "would fall back to the badge and read as brand "
+                        "new. Check the creation_time parser.",
+                        label, len(posted), len(cards),
+                    )
+                    if not self._stamp_failure_dumped:
+                        self._stamp_failure_dumped = True
+                        await dump_debug(page, cfg.debug_dir, "no-stamps-matched")
                 read_at = time.monotonic() - render_delay
             elif cards:
                 # Ages drive the freshness gate, so losing them silently would
-                # stop every alert while the log still looked healthy.
+                # stop every alert while the log still looked healthy. Say
+                # what the consequence is: the gate falls back to the card's
+                # badge here, and "Just listed" is Facebook's wording for
+                # listings up to around a day old.
                 log.warning(
-                    "%s search: page carried no listing timestamps — ages "
-                    "unknown, so nothing can be proven fresh",
-                    label,
+                    "%s search: %d listing(s) parsed but the page carried no "
+                    "timestamps - ages fall back to the card badge, which "
+                    "can read an old listing as brand new",
+                    label, len(cards),
                 )
             # --debug keeps an HTML/screenshot of every empty or partial parse.
             # Without it, a dump is only written on a fully empty poll, so a

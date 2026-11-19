@@ -81,6 +81,9 @@ class FakePage:
     async def inner_text(self, *args: object, **kwargs: object) -> str:
         return ""
 
+    async def screenshot(self, *args: object, **kwargs: object) -> None:
+        return None
+
     async def close(self) -> None:
         return None
 
@@ -498,6 +501,47 @@ async def main() -> int:
             "the render wait is counted, so the age is never understated",
             any(m.startswith("ALERT (age: 8 min)") for m in logs),
         )
+
+    # 16. A page full of stamps that belong to nobody must be loud. This was
+    # the photo-id bug: 24 stamps on the page, 0 cards dated, and every
+    # hour-old listing announced as 0 minutes old with nothing in the log.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST[:1], sent, ages=None)
+        now = int(time.time())
+
+        async def foreign_stamps(page):
+            # Stamps exist, but keyed by a photo id rather than a listing id.
+            return {"999999999": now}, now
+
+        with p1, p2, p3, p4, p5, p6:
+            with patch.object(runner_mod, "read_creation_times", foreign_stamps):
+                with _capture_runner_log() as logs:
+                    await runner.poll_once()
+                    await runner.poll_once()
+        check(
+            "stamps that match no listing are warned about",
+            any("none matched any of the 1 listing(s) parsed" in m for m in logs),
+        )
+        dumps = list((Path(tmpdir) / "debug").glob("*no-stamps-matched.html"))
+        check("one HTML dump preserves the evidence (not one per poll)", len(dumps) == 1)
+
+    # 17. The same check stays quiet when stamps do land on their listings.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(Path(tmpdir), max_listed_minutes=8, first_run_silent=False)
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        p1, p2, p3, p4, p5, p6 = _patches(CARD_LIST[:1], sent, ages=minutes(2))
+        with p1, p2, p3, p4, p5, p6:
+            with _capture_runner_log() as logs:
+                await runner.poll_once()
+        check(
+            "a healthy poll does not warn about stamp matching",
+            not any("none matched any of" in m for m in logs),
+        )
+        check("a healthy poll alerts normally", len(sent) == 1)
 
     print()
     if failures:
