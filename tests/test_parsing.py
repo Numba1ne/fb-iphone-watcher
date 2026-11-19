@@ -115,13 +115,16 @@ async def main() -> int:
     # The page's own JSON dates each card. This is the only source of an exact
     # age now, so the shape it is read from is worth pinning down.
     page_json = (
-        '{"node":{"image":{"id":"999"}},"id":"2164263900835174"},'
+        '{"listing":{"__typename":"GroupCommerceProductItem","id":"2164263900835174",'
+        '"primary_listing_photo":{"__typename":"CatalogMarketplaceEnhancementTransformedImage",'
+        '"image":{"uri":"https://example/x.jpg"},"id":"999"},'
         '"creation_time":1794216182,"__isMarketplaceListingRenderable":"x"}'
         '{"listing_price":{"amount":"160"}}'
         '"creation_time":1794212181,"server_time":1794217246'
     )
     posted, server = parse_creation_times(page_json)
     check("a card's timestamp is read from the page", posted.get("2164263900835174") == 1794216182)
+    check("the photo id is not mistaken for the listing", "999" not in posted)
     check("Facebook's server clock is read too", server == 1794217246)
 
     posted, server = parse_creation_times("<html>nothing here</html>")

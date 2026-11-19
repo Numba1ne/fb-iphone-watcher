@@ -46,10 +46,20 @@ _LISTED_BADGE = re.compile(
 )
 # The card's badge ("Just listed") is too coarse to age, but every listing the
 # page renders carries its exact posting moment in the JSON that draws the
-# card: ...,"id":"1156701640250336"},"creation_time":1794214628.
+# card: ..."listing":{"__typename":"GroupCommerceProductItem","id":"<listing>".
+# ..,"id":"<photo>"},"creation_time":1794214628.
+# The id that directly precedes `},"creation_time"` is the listing's *photo*,
+# not the listing — matching it stamps every card with a stranger's timestamp
+# (or none at all), and the gate then falls back to the "Just listed" badge,
+# which reads every hour-old card as 0 minutes old. Anchor on the listing id
+# that opens the block instead, so the stamp lands on the card it belongs to.
 # This is the card's own data, so it costs no extra request and is precise to
 # the second.
-_CREATION_TIME = re.compile(r'"id":"(\d{6,})"\},"creation_time":(\d{10})')
+_CREATION_TIME = re.compile(
+    r'"listing":\{"__typename":"[^"]+","id":"(\d+)"'
+    r'(?:(?!"listing":\{"__typename").)*?"\},"creation_time":(\d{10})',
+    re.DOTALL,
+)
 # Facebook's clock as it rendered the page. Used to warn about a skewed local
 # clock, which would otherwise silently mis-judge every age.
 _SERVER_TIME = re.compile(r'"server_time":(\d{10})')
