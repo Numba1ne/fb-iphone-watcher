@@ -12,6 +12,7 @@ import random
 import re
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
@@ -82,7 +83,11 @@ def _bust_cache(url: str) -> str:
 
 
 async def open_search(
-    session: BrowserSession, cfg: AppConfig, *, url: str | None = None
+    session: BrowserSession,
+    cfg: AppConfig,
+    *,
+    url: str | None = None,
+    on_page: Callable[[Page], Awaitable[None]] | None = None,
 ) -> Page:
     """Open a search URL and confirm we landed on results.
 
@@ -91,6 +96,8 @@ async def open_search(
     The caller owns the returned page and must close it.
     """
     page = await session.new_page()
+    if on_page is not None:
+        await on_page(page)
     target = _bust_cache(url or cfg.search.build_url())
     log.debug("Navigating to %s", target)
 

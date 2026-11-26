@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import filters
 from .browser import BrowserSession, SessionExpired
+from .endpoint import EndpointError, MarketplaceEndpoint
 from .marketplace import (
     dump_debug,
     open_search,
@@ -83,6 +84,7 @@ class WatcherRunner:
         self._session: BrowserSession | None = None
         self.last_result: tuple[int, int] = (0, 0)  # (parsed, alerted) from the last attempt
         self._notif_log: NotificationLog | None = None
+        self._endpoint = MarketplaceEndpoint(cfg) if cfg.use_graphql_endpoint else None
         # True until the first poll that actually reads listings. That poll
         # records whatever is already on the search page without alerting: after
         # an overnight stop the page is full of yesterday's listings, and
@@ -344,7 +346,7 @@ class WatcherRunner:
                 searches.append(("secondary", alt))
         return searches
 
-    async def _fetch_cards(
+    async def _fetch_page(
         self, label: str, url: str
     ) -> tuple[list[Listing], int | None]:
         """Load one search in its own fresh page and parse it.
@@ -424,6 +426,29 @@ class WatcherRunner:
             return cards, read_at
         finally:
             await page.close()
+
+    async def _fetch_cards(self, label: str, url: str) -> tuple[list[Listing], float | None]:
+        if self._endpoint is not None:
+            try:
+                cards, read_at = await self._endpoint.fetch(
+                    self._session, url, self.cfg.max_cards
+                )
+                if cards:
+                    log.info(
+                        "%s search: GraphQL endpoint returned %d listing(s)",
+                        label,
+                        len(cards),
+                    )
+                    return cards, read_at
+                raise EndpointError("response held no listings")
+            except Exception as exc:  # noqa: BLE001 - fall back to page scrape
+                log.warning(
+                    "GraphQL endpoint failed for %s search: %s; falling back to page scrape",
+                    label,
+                    exc,
+                )
+                self._endpoint.invalidate()
+        return await self._fetch_page(label, url)
 
     async def _poll(self) -> int:
         """One scrape. Returns parsed count; raises on failure.

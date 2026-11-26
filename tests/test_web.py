@@ -50,9 +50,9 @@ def seed(db_path: str) -> None:
             ("12", "iPhone 15 256GB", 900, "Sutton", False),
         ]:
             store.claim(Listing.from_card(l_id, title, price, loc), now="2026-11-06T12:00:00", alert=alert)
-        store.record_poll(started_at="2026-11-06T12:00:00", finished_at="2026-11-06T12:00:05",
+        store.record_poll(started_at="2026-11-23T12:00:00", finished_at="2026-11-23T12:00:05",
                           parsed=24, new=2, ok=True)
-        store.record_poll(started_at="2026-11-06T12:01:00", finished_at="2026-11-06T12:01:04",
+        store.record_poll(started_at="2026-11-23T12:01:00", finished_at="2026-11-23T12:01:04",
                           parsed=0, new=0, ok=False, error="network down")
 
 

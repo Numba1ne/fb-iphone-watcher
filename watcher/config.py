@@ -179,6 +179,7 @@ def load(config_path: str | Path | None = None) -> AppConfig:
         db_path=resolve(str(_get(paths, "db", "data/bot.db"))),
         log_path=resolve(str(_get(paths, "log", "data/logs/bot.log"))),
         debug_dir=resolve(str(_get(paths, "debug", "data/debug"))),
+        use_graphql_endpoint=_as_bool(polling.get("use_graphql_endpoint"), False),
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,
         discord_webhook_url=discord_url,

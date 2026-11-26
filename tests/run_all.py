@@ -14,6 +14,7 @@ SUITES = [
     "tests/test_logic.py",
     "tests/test_parsing.py",
     "tests/test_notify.py",
+    "tests/test_endpoint.py",
     "tests/test_loop.py",
     "tests/test_probe.py",
     "tests/test_web.py",

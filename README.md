@@ -175,6 +175,7 @@ nothing outside this machine can connect.
 | `polling.interval_seconds` | `20` | Aggressive; hard minimum 15 |
 | `polling.jitter_seconds` | `3` | Random ± on the interval |
 | `polling.restart_browser_every` | `20` | Chromium restarts every N polls |
+| `polling.use_graphql_endpoint` | `false` | Replay Facebook's own GraphQL call instead of rendering the page (experimental) |
 | `notifications.max_age_minutes` | `8` | Alert only if the listing is this fresh; `0` disables |
 | `freshness.second_search` | `true` | Also poll a wider/no-ceiling variant and merge |
 | `freshness.second_search_radius_km` | `40` | Radius for the secondary search |

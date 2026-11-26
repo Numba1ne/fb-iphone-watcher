@@ -296,6 +296,7 @@ class AppConfig:
     telegram_chat_id: str
     discord_webhook_url: str
     debug: bool = False
+    use_graphql_endpoint: bool = False
     # Measurement only: read the notifications page every N polls and record
     # when each listing first appears there, so the saved-search push can be
     # compared against the poll. Off by default — it costs an extra page load.

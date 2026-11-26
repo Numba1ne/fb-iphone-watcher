@@ -31,6 +31,10 @@ polling:
   # staleness and memory growth, which matter on a 24/7 run. 15–25 is the
   # useful range; 0 disables it.
   restart_browser_every: 20
+  # Experimental fast path: replay Facebook's own Marketplace GraphQL call
+  # instead of rendering the search page. Faster, but it depends on Facebook's
+  # internal query shape; the bot falls back to the page scrape on failure.
+  use_graphql_endpoint: false
 
 freshness:
   # A second search with slightly different parameters, merged into the same

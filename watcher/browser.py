@@ -82,6 +82,12 @@ class BrowserSession:
         await self.stop()
         await self.start()
 
+    @property
+    def context(self) -> BrowserContext:
+        if self._context is None:
+            raise RuntimeError("BrowserSession.start() was not called")
+        return self._context
+
     async def new_page(self) -> Page:
         if self._context is None:
             raise RuntimeError("BrowserSession.start() was not called")
