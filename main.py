@@ -62,30 +62,18 @@ async def run_dashboard(cfg: AppConfig, *, port: int) -> int:
 
 
 async def do_login(cfg: AppConfig) -> int:
-    """Open a visible browser for the user to log in to Facebook by hand."""
-    from playwright.async_api import async_playwright
+    """Open a visible browser and wait for a verified Facebook session.
 
-    from watcher.browser import _USER_AGENT  # reuse the exact same identity
+    The old version opened the Marketplace page and called it done once the
+    window closed — but that page renders for a signed-out visitor too, so it
+    reported success without a session and left the watcher polling anonymous,
+    more heavily cached results. watcher.login.sign_in() checks the cookie jar
+    and then loads the notifications page the probe needs.
+    """
+    from watcher.login import sign_in
 
-    print("\n  A browser window will open. Log in to Facebook normally, wait for")
-    print("  the Marketplace page to load, then close the window.\n")
-
-    async with async_playwright() as pw:
-        context = await pw.chromium.launch_persistent_context(
-            user_data_dir=cfg.user_data_dir,
-            headless=False,
-            user_agent=_USER_AGENT,
-            locale="en-GB",
-            timezone_id="Europe/London",
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto("https://www.facebook.com/marketplace/" + cfg.search.city_slug)
-        await context.pages[-1].wait_for_event("close", timeout=0)
-        await context.close()
-
-    print("\n  Login saved to the browser profile. Next: python main.py\n")
-    return 0
+    print("\n  A browser window will open. Log in to Facebook in it.\n")
+    return await sign_in(cfg)
 
 
 async def do_test_notify(cfg: AppConfig) -> int:
