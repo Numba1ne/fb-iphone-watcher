@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -68,30 +69,57 @@ class BrowserSession:
         )
         self._context.set_default_navigation_timeout(self.cfg.navigation_timeout_ms)
         log.info("Browser started (headless=%s)", self.cfg.headless)
-        await self._warn_if_signed_out()
+        await self._restore_session()
 
-    async def _warn_if_signed_out(self) -> None:
-        """Say so when the profile has no Facebook session.
-
-        A signed-out profile is the failure that hides itself: the search page
-        still returns listings, so polls look healthy, but they are the
-        anonymous ones from a more heavily cached edge and the notifications
-        page bounces to a login form. Without this warning the only evidence is
-        a probe that quietly reports nothing.
-        """
-        if self._context is None:
-            return
+    async def _c_user_present(self) -> tuple[bool, str]:
+        assert self._context is not None
         try:
             jar = {c["name"] for c in await self._context.cookies("https://www.facebook.com")}
         except Exception as exc:  # noqa: BLE001 - never break startup over this
-            log.debug("Could not read the cookie jar: %s", exc)
-            return
+            return False, f"could not read the cookie jar: {exc}"
         if "c_user" not in jar:
+            return False, "no c_user cookie"
+        if "xs" not in jar:
+            return False, "c_user present but xs missing"
+        return True, "c_user and xs present"
+
+    async def _restore_session(self) -> None:
+        """Re-apply the saved sign-in, then warn if there still is none.
+
+        A persistent profile is not enough on its own: Facebook hands out
+        `c_user`/`xs` as session cookies for some sign-ins, and Chromium drops
+        session cookies on a clean exit. The profile directory then looks
+        untouched while the session is gone — and the loss is silent, because
+        the search page still returns listings anonymously from a more heavily
+        cached edge, with only the notifications page bouncing to a login form.
+        `watcher.login.sign_in()` writes those cookies to `browser-state.json`
+        while they are still live; this puts them back.
+        """
+        if self._context is None:
+            return
+        ok, detail = await self._c_user_present()
+        if not ok:
+            state = Path(self.cfg.user_data_dir).parent / "browser-state.json"
+            if state.exists():
+                try:
+                    cookies = json.loads(state.read_text(encoding="utf-8")).get("cookies") or []
+                    if cookies:
+                        await self._context.add_cookies(cookies)
+                        log.info(
+                            "Restored %d saved cookie(s) from %s", len(cookies), state.name
+                        )
+                except Exception as exc:  # noqa: BLE001 - a stale file is not fatal
+                    log.warning("Could not restore the saved session: %s", exc)
+            ok, detail = await self._c_user_present()
+        if not ok:
             log.warning(
-                "No Facebook session in the browser profile: polls will return "
-                "logged-out (cached, older) results and notifications cannot be "
-                "read. Stop the watcher and run `python tools/login.py` to sign in."
+                "No Facebook session (%s): polls will return logged-out (cached, "
+                "older) results and notifications cannot be read. Stop the watcher "
+                "and run `python tools/login.py` to sign in.",
+                detail,
             )
+        else:
+            log.info("Facebook session present (%s)", detail)
 
     async def stop(self) -> None:
         if self._context is not None:

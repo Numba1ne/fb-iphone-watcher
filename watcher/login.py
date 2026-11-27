@@ -116,6 +116,18 @@ async def sign_in(cfg: AppConfig, timeout_s: float = DEFAULT_TIMEOUT_S) -> int:
             print("  Finish whatever Facebook is asking for, then re-run this.")
             return 1
 
+        # The profile directory alone cannot be trusted to carry the session:
+        # Facebook issues c_user/xs as session cookies for some sign-ins and
+        # Chromium drops those on a clean exit. Write them out while they are
+        # still live; watcher.browser re-applies them at every startup.
+        state = Path(cfg.user_data_dir).parent / "browser-state.json"
+        try:
+            await context.storage_state(path=str(state))
+            print(f"\n  Session cookies written to {state}")
+        except Exception as exc:  # noqa: BLE001 - verification already passed
+            print(f"\n  Signed in, but could not write {state}: {exc}")
+            print("  The profile may be signed out again after this process exits.")
+
         print("\n  Signed in and the notifications page loads. Session saved.")
         print("  Start the watcher again now.")
         return 0
