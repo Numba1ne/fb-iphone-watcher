@@ -68,6 +68,30 @@ class BrowserSession:
         )
         self._context.set_default_navigation_timeout(self.cfg.navigation_timeout_ms)
         log.info("Browser started (headless=%s)", self.cfg.headless)
+        await self._warn_if_signed_out()
+
+    async def _warn_if_signed_out(self) -> None:
+        """Say so when the profile has no Facebook session.
+
+        A signed-out profile is the failure that hides itself: the search page
+        still returns listings, so polls look healthy, but they are the
+        anonymous ones from a more heavily cached edge and the notifications
+        page bounces to a login form. Without this warning the only evidence is
+        a probe that quietly reports nothing.
+        """
+        if self._context is None:
+            return
+        try:
+            jar = {c["name"] for c in await self._context.cookies("https://www.facebook.com")}
+        except Exception as exc:  # noqa: BLE001 - never break startup over this
+            log.debug("Could not read the cookie jar: %s", exc)
+            return
+        if "c_user" not in jar:
+            log.warning(
+                "No Facebook session in the browser profile: polls will return "
+                "logged-out (cached, older) results and notifications cannot be "
+                "read. Stop the watcher and run `python tools/login.py` to sign in."
+            )
 
     async def stop(self) -> None:
         if self._context is not None:
