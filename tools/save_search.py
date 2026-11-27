@@ -35,7 +35,7 @@ for _stream in (sys.stdout, sys.stderr):
 from playwright.async_api import Page, async_playwright  # noqa: E402
 
 from watcher import config as config_loader  # noqa: E402
-from watcher.browser import _USER_AGENT  # noqa: E402
+from watcher.browser import _USER_AGENT, restore_saved_session  # noqa: E402
 from watcher.models import AppConfig  # noqa: E402
 
 DEBUG_DIR = Path("data/debug")
@@ -164,13 +164,24 @@ async def create_saved_search(cfg: AppConfig, *, dry_run: bool) -> int:
             )
             return 1
 
+        # The profile alone may hold no session: Facebook's c_user/xs are
+        # session cookies for some sign-ins and Chromium drops them on exit.
+        signed_in, detail = await restore_saved_session(context, cfg)
+        if not signed_in:
+            print(
+                f"\n  No Facebook session in the profile ({detail}).\n"
+                "  Stop the watcher and run: python tools/login.py\n"
+            )
+            await context.close()
+            return 2
+
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
 
         if await page.query_selector('input[name="email"]') is not None:
             print("\n  Landed on a login wall — the stored session has expired.")
-            print("  Run: python main.py --login\n")
+            print("  Run: python tools/login.py\n")
             await context.close()
             return 2
 

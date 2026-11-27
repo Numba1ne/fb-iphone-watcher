@@ -27,6 +27,49 @@ class SessionExpired(Exception):
     """The stored Facebook session is missing or no longer valid."""
 
 
+async def _session_state(context: BrowserContext) -> tuple[bool, str]:
+    """Report whether the context's Facebook cookie jar carries a session."""
+    try:
+        jar = {c["name"] for c in await context.cookies("https://www.facebook.com")}
+    except Exception as exc:  # noqa: BLE001 - never break startup over this
+        return False, f"could not read the cookie jar: {exc}"
+    if "c_user" not in jar:
+        return False, "no c_user cookie"
+    if "xs" not in jar:
+        return False, "c_user present but xs missing"
+    return True, "c_user and xs present"
+
+
+async def restore_saved_session(
+    context: BrowserContext, cfg: AppConfig
+) -> tuple[bool, str]:
+    """Re-apply the sign-in saved by watcher.login.sign_in(). Returns (ok, detail).
+
+    A persistent profile is not enough on its own: Facebook hands out
+    `c_user`/`xs` as session cookies for some sign-ins, and Chromium drops
+    session cookies on a clean exit. The profile directory then looks untouched
+    while the session is gone — and the loss is silent, because the search page
+    still returns listings anonymously from a more heavily cached edge, with
+    only the notifications page bouncing to a login form.
+
+    Any tool that opens the profile itself (save_search, probe) calls this too,
+    so none of them can be the one that quietly runs signed out.
+    """
+    ok, detail = await _session_state(context)
+    if ok:
+        return True, detail
+    state = Path(cfg.user_data_dir).parent / "browser-state.json"
+    if state.exists():
+        try:
+            cookies = json.loads(state.read_text(encoding="utf-8")).get("cookies") or []
+            if cookies:
+                await context.add_cookies(cookies)
+                log.info("Restored %d saved cookie(s) from %s", len(cookies), state.name)
+        except Exception as exc:  # noqa: BLE001 - a stale file is not fatal
+            log.warning("Could not restore the saved session: %s", exc)
+    return await _session_state(context)
+
+
 class BrowserSession:
     """A persistent Chromium profile reused across every poll.
 
@@ -71,55 +114,18 @@ class BrowserSession:
         log.info("Browser started (headless=%s)", self.cfg.headless)
         await self._restore_session()
 
-    async def _c_user_present(self) -> tuple[bool, str]:
-        assert self._context is not None
-        try:
-            jar = {c["name"] for c in await self._context.cookies("https://www.facebook.com")}
-        except Exception as exc:  # noqa: BLE001 - never break startup over this
-            return False, f"could not read the cookie jar: {exc}"
-        if "c_user" not in jar:
-            return False, "no c_user cookie"
-        if "xs" not in jar:
-            return False, "c_user present but xs missing"
-        return True, "c_user and xs present"
-
     async def _restore_session(self) -> None:
-        """Re-apply the saved sign-in, then warn if there still is none.
-
-        A persistent profile is not enough on its own: Facebook hands out
-        `c_user`/`xs` as session cookies for some sign-ins, and Chromium drops
-        session cookies on a clean exit. The profile directory then looks
-        untouched while the session is gone — and the loss is silent, because
-        the search page still returns listings anonymously from a more heavily
-        cached edge, with only the notifications page bouncing to a login form.
-        `watcher.login.sign_in()` writes those cookies to `browser-state.json`
-        while they are still live; this puts them back.
-        """
-        if self._context is None:
-            return
-        ok, detail = await self._c_user_present()
-        if not ok:
-            state = Path(self.cfg.user_data_dir).parent / "browser-state.json"
-            if state.exists():
-                try:
-                    cookies = json.loads(state.read_text(encoding="utf-8")).get("cookies") or []
-                    if cookies:
-                        await self._context.add_cookies(cookies)
-                        log.info(
-                            "Restored %d saved cookie(s) from %s", len(cookies), state.name
-                        )
-                except Exception as exc:  # noqa: BLE001 - a stale file is not fatal
-                    log.warning("Could not restore the saved session: %s", exc)
-            ok, detail = await self._c_user_present()
-        if not ok:
+        assert self._context is not None
+        ok, detail = await restore_saved_session(self._context, self.cfg)
+        if ok:
+            log.info("Facebook session present (%s)", detail)
+        else:
             log.warning(
                 "No Facebook session (%s): polls will return logged-out (cached, "
                 "older) results and notifications cannot be read. Stop the watcher "
                 "and run `python tools/login.py` to sign in.",
                 detail,
             )
-        else:
-            log.info("Facebook session present (%s)", detail)
 
     async def stop(self) -> None:
         if self._context is not None:
