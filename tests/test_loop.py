@@ -590,6 +590,38 @@ async def main() -> int:
         check("the gated probe listing is left for the poll to judge", row["id"] == "902")
         check("the delivered probe alert is recorded as told", row["notified"] == 1)
 
+    # 19. The page's own freshness is measured, so a cached page can be told
+    # apart from a late index: the newest listing id either moves or it doesn't.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        runner = WatcherRunner(make_cfg(Path(tmpdir)))
+
+        def dated(item_id: str) -> Listing:
+            return replace(CARD_LIST[0], id=item_id, posted_epoch=1000)
+
+        with patch.object(runner_mod.time, "monotonic", lambda: 0.0):
+            runner._note_page_freshness([dated("1")])
+        with patch.object(runner_mod.time, "monotonic", lambda: 100.0):
+            with _capture_runner_log() as logs:
+                runner._note_page_freshness([dated("2")])
+        check(
+            "a page whose newest listing moved is logged as advanced",
+            any(m.startswith("Search page advanced after 1.7 min") for m in logs),
+        )
+
+        stale_after = runner_mod._STALE_PAGE_AFTER_S
+        with patch.object(
+            runner_mod.time, "monotonic", lambda: 100.0 + stale_after
+        ):
+            with _capture_runner_log() as logs:
+                runner._note_page_freshness([dated("2")])
+                runner._note_page_freshness([dated("2")])
+        claims = [m for m in logs if "may be cached" in m]
+        check(
+            "a page stuck on one newest listing is called out",
+            len(claims) == 1 and "nothing newer than 2" in claims[0],
+        )
+        check("the stale-page warning is said once per streak", len(claims) == 1)
+
     print()
     if failures:
         print(f"{len(failures)} check(s) failed")

@@ -45,6 +45,11 @@ log = logging.getLogger(__name__)
 # Matches the price inside a notification's text ("New listing: iPhone 13 £280").
 _NOTIF_PRICE = re.compile(r"£\s*([\d,]+)")
 
+# How long the search page may show the same newest listing before the log
+# says so. A quiet search legitimately stands still, so this is a warning and
+# not an error, but half an hour of it is the shape a cached page has.
+_STALE_PAGE_AFTER_S = 20 * 60
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -100,6 +105,14 @@ class WatcherRunner:
         # page that stops carrying usable stamps altogether must not fill
         # the debug directory on every poll.
         self._stamp_failure_dumped = False
+        # Freshness of the page itself, not of the listings on it: the newest
+        # listing id the search has ever shown and when it last changed. An
+        # alert log cannot tell a late index from a cached page, but this can —
+        # if the newest id stands still while its age climbs, we are being
+        # served the same rendered page over and over.
+        self._newest_id: str | None = None
+        self._newest_changed_at: float | None = None
+        self._stale_page_warned = False
 
     # -------------------------------------------------------------- control
 
@@ -431,6 +444,49 @@ class WatcherRunner:
         finally:
             await page.close()
 
+    def _note_page_freshness(self, cards: list[Listing]) -> None:
+        """Measure how long the search has been showing the same newest listing.
+
+        A listing arriving late has two very different causes that look
+        identical in an alert log: Facebook's index lagging behind the post, or
+        Facebook serving us one rendered page for half an hour. If the newest
+        id stands still while its own age climbs, the page is being reused; if
+        the newest id changes on every poll and the new item is already old,
+        the index is what is late. Nothing else in the log separates the two.
+        """
+        dated = [card for card in cards if card.posted_epoch is not None]
+        if not dated:
+            return
+        newest = max(dated, key=lambda card: card.posted_epoch or 0)
+        now = time.monotonic()
+
+        if newest.id != self._newest_id:
+            if self._newest_id is not None and self._newest_changed_at is not None:
+                log.info(
+                    "Search page advanced after %.1f min (newest %s, %s)",
+                    (now - self._newest_changed_at) / 60.0,
+                    newest.id,
+                    newest.listed_text or "age unknown",
+                )
+            self._newest_id = newest.id
+            self._newest_changed_at = now
+            self._stale_page_warned = False
+            return
+
+        if self._newest_changed_at is None:
+            return
+        unchanged = now - self._newest_changed_at
+        if unchanged >= _STALE_PAGE_AFTER_S and not self._stale_page_warned:
+            # Once per streak: a genuinely quiet search would otherwise repeat
+            # this every few minutes all night.
+            self._stale_page_warned = True
+            log.warning(
+                "Search page has shown nothing newer than %s for %.0f min - "
+                "the page may be cached rather than freshly rendered",
+                newest.id,
+                unchanged / 60.0,
+            )
+
     async def _fetch_cards(self, label: str, url: str) -> tuple[list[Listing], float | None]:
         if self._endpoint is not None:
             try:
@@ -497,6 +553,8 @@ class WatcherRunner:
                 cards.append(
                     card if read_at is None else card.with_created_clock(int(read_at))
                 )
+
+        self._note_page_freshness(cards)
 
         if errors:
             for err in errors:
