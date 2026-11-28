@@ -543,6 +543,53 @@ async def main() -> int:
         )
         check("a healthy poll alerts normally", len(sent) == 1)
 
+    # 18. The age gate covers the notification path too. A saved-search push
+    # is the one alert that can arrive without our search ever showing the
+    # listing, so a late or re-delivered notification would otherwise bypass
+    # `max_age_minutes` and land on the phone at any age.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = make_cfg(
+            Path(tmpdir),
+            max_listed_minutes=15,
+            first_run_silent=False,
+            alert_from_probe=True,
+        )
+        sent: list[Listing] = []
+        runner = WatcherRunner(cfg)
+        from watcher.notify import Notifier
+
+        async def capture(self, listing):
+            sent.append(listing)
+            return True
+
+        items = [
+            # 31 minutes old: the case that got through in the field.
+            {"id": "901", "text": "New listing: iPhone 17 £600", "age_text": "31m"},
+            {"id": "902", "text": "New listing: iPhone 14 £350", "age_text": "10m"},
+            # A row with no readable age is not evidence of freshness.
+            {"id": "903", "text": "New listing: iPhone 13 £300", "age_text": ""},
+        ]
+        with patch.object(Notifier, "send", capture):
+            with _capture_runner_log() as logs:
+                await runner._alert_from_probe(items)
+
+        check(
+            "a probe alert older than the gate is not sent",
+            [x.id for x in sent] == ["902"],
+        )
+        check(
+            "the stale probe alert is logged with its age",
+            any(m.startswith("SKIPPED (probe alert too old: 31 min)") for m in logs),
+        )
+        check(
+            "an age-less probe alert is skipped as unknown, not as new",
+            any(m.startswith("SKIPPED (probe alert too old: unknown age)") for m in logs),
+        )
+        with Store(cfg.db_path) as store:
+            row = store.search_listings(limit=1)[0][0]
+        check("the gated probe listing is left for the poll to judge", row["id"] == "902")
+        check("the delivered probe alert is recorded as told", row["notified"] == 1)
+
     print()
     if failures:
         print(f"{len(failures)} check(s) failed")

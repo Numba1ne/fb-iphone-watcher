@@ -223,6 +223,15 @@ async def main() -> int:
     check("text with no age yields nothing", _parse_age("Notifications") == "")
     check("a bare unit is not an age", _parse_age("3 s ") == "3s")
 
+    # 8b. The gate reads that compact form, and an unparseable row is unknown
+    #     rather than zero.
+    from watcher.notifications import age_minutes
+
+    check("minutes are read from the compact age", age_minutes("31m") == 31)
+    check("hours are converted to minutes", age_minutes("2h") == 120)
+    check("sub-minute ages read as zero", age_minutes("30s") == 0)
+    check("an empty age is unknown, not zero", age_minutes("") is None)
+
     # 9. The log records the first sighting only, and survives a restart.
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "notif-log.jsonl"

@@ -32,7 +32,11 @@ from .marketplace import (
     stamp_created,
 )
 from .models import AppConfig, Listing
-from .notifications import NotificationLog, fetch_alert_items
+from .notifications import (
+    NotificationLog,
+    age_minutes as notif_age_minutes,
+    fetch_alert_items,
+)
 from .notify import Notifier
 from .store import Store
 
@@ -684,6 +688,12 @@ class WatcherRunner:
         applied to it; anything they reject is left for the search poll to
         judge properly. A claimed id is also how we stop the next poll from
         alerting the same listing a second time.
+
+        The freshness gate applies here too, and for the same reason: this path
+        can announce a listing the search never showed us, so without it a push
+        Facebook delivers late — or redelivers from before a restart — bypasses
+        `max_age_minutes` entirely and lands in the phone anyway. A gated-out
+        listing is not claimed, so the poll still gets to judge it.
         """
         cfg = self.cfg
         async with Notifier(cfg) as notifier:
@@ -708,6 +718,15 @@ class WatcherRunner:
                 )
                 if not matched:
                     continue
+                if cfg.max_listed_minutes > 0:
+                    age = notif_age_minutes(item.get("age_text") or "")
+                    if age is None or age > cfg.max_listed_minutes:
+                        log.info(
+                            "SKIPPED (probe alert too old: %s)  %s",
+                            "unknown age" if age is None else f"{age} min",
+                            listing.title,
+                        )
+                        continue
                 with Store(cfg.db_path) as store:
                     if not store.claim(listing, now=_utc_now(), alert=False):
                         continue

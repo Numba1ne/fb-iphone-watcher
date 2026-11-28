@@ -97,6 +97,18 @@ def _age_to_seconds(age_text: str) -> int | None:
     return int(match.group(1)) * _AGE_SECONDS[match.group(2)]
 
 
+def age_minutes(age_text: str) -> int | None:
+    """A notification row's age in whole minutes, or None if it has none.
+
+    The compact "31m"/"2h" form is Facebook's own wording for a notification
+    row, so this is the only age a probe alert can be gated on. None means
+    "unreadable", which must never be treated as brand new: an unread alert is
+    left to the search poll, which can read the card properly.
+    """
+    seconds = _age_to_seconds(age_text)
+    return None if seconds is None else seconds // 60
+
+
 async def _read_rows(page: Page) -> list[dict]:
     try:
         return await page.evaluate(_EXTRACT_JS)
